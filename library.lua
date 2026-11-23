@@ -1726,6 +1726,8 @@ function Elements:AddToggle(idx, info)
         local hit = New("TextButton", { Name = "SwitchHit", Text = "", Size = UDim2.new(0, tw + 8, 1, 0), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 4, 0, 0), ZIndex = 2, Parent = row })
         local lhit = New("TextButton", { Name = "LabelHit", Text = "", Size = UDim2.new(0, 0, 1, 0), ZIndex = 2, Parent = row })
         FitLabelHit(row, label, lhit, obj, tw + 10)
+        Lib:_AttachPinMenu(lhit, obj)
+        Lib:_AttachPinMenu(hit, obj)
         obj.Label = label
         local function Render()
                 Tween(fill, { BackgroundTransparency = obj.Value and 0 or 1 }, 0.14)
@@ -1745,7 +1747,7 @@ function Elements:AddToggle(idx, info)
         function obj:Toggle() self:SetValue(not self.Value) end
         function obj:AddColorPicker(i, inf) return Lib:_CreateColorPicker(self, i, inf) end
         function obj:AddKeyPicker(i, inf) return Lib:_CreateKeyPicker(self, i, inf) end
-        local function Flip() if not info.Disabled then obj:SetValue(not obj.Value) end end
+        local function Flip() if Lib._PinHold or info.Disabled then return end obj:SetValue(not obj.Value) end
         hit.Activated:Connect(Flip)
         lhit.Activated:Connect(Flip)
         obj:SetDisabled(info.Disabled)
@@ -2702,7 +2704,10 @@ function Lib:_CreateKeyPicker(owner, idx, info)
                 Sync()
                 Safe(info.ChangedCallback, self.Key)
         end
-        local menu = Sink(New("Frame", { Visible = false, Size = UDim2.fromOffset(86, #KeyModes * H(26) + 6), BackgroundTransparency = 0, ZIndex = 80, Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+        local pinnable = picker.Index ~= nil -- a pin needs an id to survive restarts
+        local MENU_W = 100
+        local menuH = (#KeyModes + (pinnable and 1 or 0)) * H(26) + 6
+        local menu = Sink(New("Frame", { Visible = false, Size = UDim2.fromOffset(MENU_W, menuH), BackgroundTransparency = 0, ZIndex = 80, Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
         Corner(menu, 6) Stroke(menu, "Stroke", 1, 0) List(menu, 0) Pad(menu, 3, 3, 3, 3)
         New("UIScale", { Scale = Lib.Scale, Parent = menu })
         local mbtn = {}
@@ -2711,9 +2716,22 @@ function Lib:_CreateKeyPicker(owner, idx, info)
                 Press(b, function() picker:SetMode(mode) Lib:ClosePopup() end)
                 mbtn[mode] = b
         end
+        local pinBtn
+        if pinnable then
+                pinBtn = New("TextButton", { Text = "", TextSize = 12, Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = #KeyModes + 1, ZIndex = 81, Theme = { TextColor3 = "SubText" }, Parent = menu })
+                Press(pinBtn, function()
+                        if Lib:IsPinned(picker.Index) then Lib:Unpin(picker.Index) else Lib:Pin(picker) end
+                        Lib:ClosePopup()
+                end)
+        end
         local function OpenMenu()
                 for mode, b in pairs(mbtn) do b.TextColor3 = (picker.Mode == mode) and Lib.Theme.Accent or Lib.Theme.SubText end
-                local pos = PlaceBelow(button, 86 * Lib.Scale, (#KeyModes * H(26) + 6) * Lib.Scale, 4, true, WinBounds())
+                if pinBtn then
+                        local pinned = Lib:IsPinned(picker.Index)
+                        pinBtn.Text = pinned and "Unpin" or "Pin to screen"
+                        pinBtn.TextColor3 = pinned and Lib.Theme.Accent or Lib.Theme.SubText
+                end
+                local pos = PlaceBelow(button, MENU_W * Lib.Scale, menuH * Lib.Scale, 4, true, WinBounds())
                 menu.Position = UDim2.fromOffset(pos.X, pos.Y)
                 menu.UIScale.Scale = Lib.Scale
                 menu.Visible = true
@@ -4737,7 +4755,7 @@ function Chat:MessageMenu(msg)
         local name = tostring(msg.display ~= "" and msg.display or msg.name or "?")
         local mine = tostring(msg.uid) == tostring(LocalPlayer.UserId)
         table.insert(items, { Text = "View profile", Callback = function() self:ShowProfile(msg) end })
-        if msg.id then table.insert(items, { Text = "Reply", Callback = function() self:SetReply({ id = msg.id, name = name, text = tostring(msg.text ~= "" and msg.text or "[image]"):sub(1, 70) }) end }) end
+        if msg.id then table.insert(items, { Text = "Reply", Callback = function() self:SetReply({ id = msg.id, name = name, text = tostring(msg.text ~= "" and msg.text or (msg.cfg and "[config]" or "[image]")):sub(1, 70) }) end }) end
         if mine and msg.id then table.insert(items, { Text = "Edit message", Callback = function() self:EditMessage(msg) end }) end
         table.insert(items, { Text = "Mention", Callback = function() self:Prefill(self.Input.Text .. "@" .. tostring(msg.name) .. " ") end })
         if type(setclipboard) == "function" and tostring(msg.text or "") ~= "" then table.insert(items, { Text = "Copy text", Callback = function() setclipboard(tostring(msg.text)) end }) end
@@ -5050,10 +5068,11 @@ function Chat:AddMessage(msg)
         local inner = maxCol - 16
         local txt = tostring(msg.text or "")
         local img = type(msg.image) == "table" and msg.image or nil
+        local cfgc = type(msg.cfg) == "table" and msg.cfg or nil
         local url = txt:match("https?://[^%s<>\"]+")
         if url then url = url:gsub("[%.,;:!%?%)%]]+$", "") end
         local needW = math.min(math.ceil(Measure(txt, 13, Lib.Font, inner).X) + 6, inner)
-        if url or img then needW = inner end
+        if url or img or cfgc then needW = inner end
         local quoteTxt
         if type(msg.reply) == "table" then
                 quoteTxt = tostring(msg.reply.text or "")
@@ -5146,6 +5165,7 @@ function Chat:AddMessage(msg)
                 end)
         end
         if url then self:LoadPreview(bubble, url, 4) end
+        if cfgc then Lib:_BuildConfigCard(self, bubble, cfgc, 5) end
         item.MouseEnter:Connect(function() Tween(bubble, { BackgroundTransparency = math.max(rest - 0.15, 0) }, 0.06) end)
         item.MouseLeave:Connect(function() Tween(bubble, { BackgroundTransparency = rest }, 0.1) end)
         item.Activated:Connect(function() self:MessageMenu(msg) end)
@@ -5153,9 +5173,9 @@ function Chat:AddMessage(msg)
         self:_Trim()
         if self.Loaded and not self.Stick and not mine then self.JumpCount = self.JumpCount + 1 self.Jump.Text = "↓ " .. self.JumpCount .. " new" end
         if pinged and self.Loaded then
-                self:AddNotif(msg, nm, txt ~= "" and txt or "[image]")
+                self:AddNotif(msg, nm, txt ~= "" and txt or (cfgc and "[config]" or "[image]"))
                 if not self.PanelObj._shown then
-                        Lib:Notify({ Title = (type(msg.reply) == "table" and "Reply from " or "Mentioned by ") .. nm, Text = txt:sub(1, 90), Type = "warn", Duration = 6 })
+                        Lib:Notify({ Title = (type(msg.reply) == "table" and "Reply from " or "Mentioned by ") .. nm, Text = (txt ~= "" and txt or (cfgc and "[config]" or "[image]")):sub(1, 90), Type = "warn", Duration = 6 })
                         if self.PanelObj.RailButton then self.PanelObj.RailButton:AddBadge() end
                 end
         end
@@ -5196,7 +5216,7 @@ function Chat:EditMessage(msg)
         Lib:Prompt({ Title = "Edit message", Text = "", Default = tostring(msg.text or ""), Confirm = "Save" }, function(t)
                 t = Trim(t)
                 if t == tostring(msg.text or "") then return end
-                if t == "" and not msg.image then return end
+                if t == "" and not msg.image and not msg.cfg then return end
                 task.spawn(function()
                         local d = Decode(self:_Do("/edit", nil, "POST", HttpService:JSONEncode({ id = msg.id, text = t })))
                         if not (d and d.ok) then self:System((d and d.error) or "Couldn't edit that message.") return end
@@ -6779,6 +6799,356 @@ function Lib:ListConfigs()
         return out
 end
 
+-- ── pinned on-screen buttons ──────────────────────────────────────────────────
+Lib.Pins = {}
+do
+        local PinCfg = { Show = true, Lock = false, Size = 40, Opacity = 0.45 }
+        local PinPos = {} -- id -> { x, y } as 0..1 of the screen. Master list, also holds pins whose element isn't built yet.
+        local loaded, saveQueued = false, false
+
+        local function PinFile() return Lib.ConfigFolder .. "/pins.json" end
+
+        -- ConfigFolder is only final after CreateWindow, so read lazily, never at library load.
+        local function ReadPins()
+                if loaded then return end
+                loaded = true
+                if not Lib.HasFS then return end
+                pcall(function()
+                        if not isfile(PinFile()) then return end
+                        local d = HttpService:JSONDecode(readfile(PinFile()))
+                        if type(d.cfg) == "table" then
+                                for k, v in pairs(PinCfg) do
+                                        if type(d.cfg[k]) == type(v) then PinCfg[k] = d.cfg[k] end
+                                end
+                                PinCfg.Size = math.clamp(PinCfg.Size, 28, 72)
+                                PinCfg.Opacity = math.clamp(PinCfg.Opacity, 0.1, 1)
+                        end
+                        if type(d.pins) == "table" then
+                                for id, p in pairs(d.pins) do
+                                        if type(p) == "table" and tonumber(p.x) and tonumber(p.y) then PinPos[id] = { x = tonumber(p.x), y = tonumber(p.y) } end
+                                end
+                        end
+                end)
+        end
+
+        function Lib:_SavePins()
+                if not self.HasFS or saveQueued then return end
+                saveQueued = true -- debounce: sliders fire a lot
+                task.delay(0.4, function()
+                        saveQueued = false
+                        pcall(function()
+                                Ensure()
+                                writefile(PinFile(), HttpService:JSONEncode({ v = 1, cfg = PinCfg, pins = PinPos }))
+                        end)
+                end)
+        end
+
+        local function PinLabel(obj)
+                return tostring((obj.Type == "KeyPicker" and obj.Title) or (obj.Info and obj.Info.Text) or obj.Index or "?")
+        end
+
+        local function PinOn(obj)
+                if obj.Type == "KeyPicker" then return obj:GetState() end
+                return obj.Value
+        end
+
+        -- Hold keybinds follow the press; Toggle keybinds and toggles flip on press; "Always" keybinds do nothing.
+        local function PinFire(obj, down)
+                if obj.Type == "KeyPicker" then
+                        if obj.Mode == "Hold" then obj:SetState(down)
+                        elseif obj.Mode == "Toggle" and down then obj:SetState(not obj.State) end
+                elseif down then
+                        obj:SetValue(not obj.Value)
+                end
+        end
+
+        function Lib:IsPinned(id) return id ~= nil and PinPos[id] ~= nil end
+
+        function Lib:_BuildPin(id)
+                local obj, pos = self.Options[id], PinPos[id]
+                if not obj or not pos or self.Pins[id] then return end
+                if obj.Type ~= "Toggle" and obj.Type ~= "KeyPicker" then return end
+                local btn = New("TextButton", { Name = "Pin_" .. tostring(id), Text = "", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(pos.x, pos.y),
+                        Size = UDim2.fromOffset(PinCfg.Size, PinCfg.Size), BackgroundTransparency = 0, BackgroundColor3 = Lib.Theme.Surface, ZIndex = 18, Visible = PinCfg.Show, Parent = self.Gui })
+                Corner(btn, 12)
+                local st = Stroke(btn, "Accent", 1.5, 0.6)
+                local lbl = New("TextLabel", { Text = Short(PinLabel(obj), 14), TextSize = 9, TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd,
+                        Size = UDim2.new(1, -6, 1, -6), Position = UDim2.fromOffset(3, 3), ZIndex = 19, TextColor3 = Lib.Theme.SubText, Font = Lib.FontBold, Parent = btn })
+                local dot = New("Frame", { Size = UDim2.fromOffset(6, 6), Position = UDim2.new(1, -9, 0, 3), ZIndex = 20, BackgroundColor3 = Lib.Theme.Dim, Parent = btn })
+                Corner(dot, 3)
+                self.Pins[id] = { Obj = obj, Btn = btn, Stroke = st, Label = lbl, Dot = dot }
+
+                -- menu OPEN + unlocked: drag to place, tap flips. Otherwise the press itself drives the feature.
+                local function Dragging() return Lib.Visible and not PinCfg.Lock end
+                self:MakeDraggable(btn, btn, {
+                        Check = Dragging,
+                        OnTap = function() Safe(PinFire, obj, true) Safe(PinFire, obj, false) end,
+                        OnEnd = function()
+                                local g = Lib.Gui
+                                local c = btn.AbsolutePosition + btn.AbsoluteSize / 2
+                                local x = math.clamp((c.X - g.AbsolutePosition.X) / g.AbsoluteSize.X, 0.02, 0.98)
+                                local y = math.clamp((c.Y - g.AbsolutePosition.Y) / g.AbsoluteSize.Y, 0.02, 0.98)
+                                btn.Position = UDim2.fromScale(x, y)
+                                PinPos[id] = { x = x, y = y }
+                                Lib:_SavePins()
+                        end,
+                })
+                btn.InputBegan:Connect(function(input)
+                        if Dragging() or not IsPress(input) then return end
+                        Safe(PinFire, obj, true)
+                        local c
+                        c = UIS.InputEnded:Connect(function(i)
+                                local fin = (i == input) or (input.UserInputType == Enum.UserInputType.MouseButton1 and i.UserInputType == Enum.UserInputType.MouseButton1)
+                                if fin then c:Disconnect() Safe(PinFire, obj, false) end
+                        end)
+                end)
+        end
+
+        function Lib:Pin(obj, silent)
+                local id = obj and obj.Index
+                if not id or (obj.Type ~= "Toggle" and obj.Type ~= "KeyPicker") then return false end
+                ReadPins()
+                if PinPos[id] then return true end
+                local n = 0
+                for _ in pairs(PinPos) do n = n + 1 end
+                PinPos[id] = { x = 0.9, y = math.min(0.25 + 0.1 * n, 0.9) } -- stack down the right edge; drag from there
+                self:_BuildPin(id)
+                self:_SavePins()
+                if not silent then self:Notify({ Title = "Pinned", Text = PinLabel(obj) .. ". Drag it while the menu is open.", Type = "success", Duration = 3 }) end
+                return true
+        end
+
+        function Lib:Unpin(id)
+                local p = self.Pins[id]
+                if p then p.Btn:Destroy() self.Pins[id] = nil end
+                PinPos[id] = nil
+                self:_SavePins()
+        end
+
+        function Lib:_ApplyPins()
+                for _, p in pairs(self.Pins) do
+                        p.Btn.Visible = PinCfg.Show
+                        p.Btn.Size = UDim2.fromOffset(PinCfg.Size, PinCfg.Size)
+                        p.Label.TextSize = math.max(8, math.floor(PinCfg.Size / 4.4))
+                end
+        end
+
+        -- Build every saved pin. Safe to call again; pins whose element doesn't exist yet are skipped.
+        function Lib:LoadPins()
+                ReadPins()
+                for id in pairs(PinPos) do self:_BuildPin(id) end
+                self:_ApplyPins()
+        end
+
+        -- state colours (cheap, 10x/sec, same cadence as the keybind list)
+        local acc = 0
+        Lib:Connect(RunService.RenderStepped, function(dt)
+                acc = acc + dt
+                if acc < 0.1 then return end
+                acc = 0
+                local T = Lib.Theme
+                for _, p in pairs(Lib.Pins) do
+                        local on = PinOn(p.Obj) and true or false
+                        local a = on and math.min(1, PinCfg.Opacity + 0.35) or PinCfg.Opacity
+                        p.Btn.BackgroundTransparency = 1 - a
+                        p.Btn.BackgroundColor3 = on and T.Accent or T.Surface
+                        p.Label.TextColor3 = on and T.OnAccent or T.SubText
+                        p.Label.TextTransparency = 1 - math.min(1, a + 0.3)
+                        p.Stroke.Transparency = on and 0.2 or 0.6
+                        p.Dot.BackgroundColor3 = on and T.Good or T.Dim
+                end
+        end)
+
+        -- Right-click / long-press menu for toggles (keybinds get the entry in their own mode menu, see 1B).
+        local pinMenu
+        local function PinMenu()
+                if pinMenu and pinMenu.Frame.Parent then return pinMenu end
+                local f = Sink(New("Frame", { Visible = false, Size = UDim2.fromOffset(120, H(26) + 6), BackgroundTransparency = 0, ZIndex = 80, Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+                Corner(f, 6) Stroke(f, "Stroke", 1, 0) Pad(f, 3, 3, 3, 3)
+                New("UIScale", { Scale = Lib.Scale, Parent = f })
+                local b = New("TextButton", { Text = "", TextSize = 12, Size = UDim2.new(1, 0, 0, H(26)), ZIndex = 81, Theme = { TextColor3 = "SubText" }, Parent = f })
+                pinMenu = { Frame = f, Btn = b }
+                Press(b, function() if pinMenu.Fn then pinMenu.Fn() end Lib:ClosePopup() end)
+                return pinMenu
+        end
+
+        function Lib:_AttachPinMenu(btn, obj)
+                local function Open(input)
+                        if not obj.Index then return end
+                        local m = PinMenu()
+                        local pinned = Lib:IsPinned(obj.Index)
+                        m.Btn.Text = pinned and "Unpin from screen" or "Pin to screen"
+                        m.Btn.TextColor3 = pinned and Lib.Theme.Accent or Lib.Theme.SubText
+                        m.Fn = function() if Lib:IsPinned(obj.Index) then Lib:Unpin(obj.Index) else Lib:Pin(obj) end end
+                        local pos = PlaceBelow(btn, 120 * Lib.Scale, (H(26) + 6) * Lib.Scale, 4, true, WinBounds())
+                        m.Frame.Position = UDim2.fromOffset(pos.X, pos.Y)
+                        m.Frame.UIScale.Scale = Lib.Scale
+                        m.Frame.Visible = true
+                        Lib:OpenPopup(m.Frame, function() m.Frame.Visible = false end, btn)
+                end
+                btn.MouseButton2Click:Connect(function() Open() end)
+                btn.InputBegan:Connect(function(input)
+                        if input.UserInputType ~= Enum.UserInputType.Touch then return end
+                        local held, c = true, nil
+                        c = UIS.InputEnded:Connect(function(i) if i == input then held = false c:Disconnect() end end)
+                        task.delay(0.45, function()
+                                if not held then return end
+                                held = false
+                                Lib._PinHold = input -- swallow the tap that the finger lift would otherwise register
+                                UIS.InputEnded:Once(function() task.delay(0.15, function() Lib._PinHold = nil end) end)
+                                Open()
+                        end)
+                end)
+        end
+
+        function Lib:BuildPinSettings(g)
+                ReadPins()
+                task.defer(function() Lib:LoadPins() end) -- after the user's own UI exists
+                local function Changed() Lib:_ApplyPins() Lib:_SavePins() end
+                g:AddToggle("__PinShow", { Text = "Show pinned buttons", Default = PinCfg.Show, IgnoreConfig = true, Callback = function(v) PinCfg.Show = v Changed() end })
+                g:AddToggle("__PinLock", { Text = "Lock positions", Default = PinCfg.Lock, IgnoreConfig = true, Callback = function(v) PinCfg.Lock = v Changed() end })
+                g:AddSlider("__PinSize", { Text = "Button size", Min = 28, Max = 72, Default = PinCfg.Size, Rounding = 0, IgnoreConfig = true, Callback = function(v) PinCfg.Size = v Changed() end })
+                g:AddSlider("__PinOpacity", { Text = "Idle opacity", Min = 0.1, Max = 1, Default = PinCfg.Opacity, Rounding = 2, IgnoreConfig = true, Callback = function(v) PinCfg.Opacity = v Changed() end })
+                g:AddButton({ Text = "Unpin all", DoubleClick = true, Func = function()
+                        local ids = {}
+                        for id in pairs(PinPos) do table.insert(ids, id) end
+                        for _, id in ipairs(ids) do Lib:Unpin(id) end
+                end })
+                g:AddLabel("Right-click (or long-press on mobile) a toggle or keybind to pin it. Drag pins while this menu is open.")
+        end
+end
+
+-- ── shared configs ────────────────────────────────────────────────────────────
+-- Save a received config into the saved-configs folder (never applies it). Returns the final name, or false + error.
+function Lib:ImportConfig(name, data)
+        if not self.HasFS then return false, "Your executor has no file functions." end
+        if type(data) ~= "table" then return false, "That isn't a valid config." end
+        local clean, count = {}, 0
+        for k, v in pairs(data) do
+                if type(k) == "string" and not k:find("^__") and type(v) == "table" and type(v.Type) == "string" then
+                        clean[k] = v
+                        count = count + 1
+                end
+        end
+        if count == 0 then return false, "That config is empty." end
+        name = Sanitize(name or ""):sub(1, 40)
+        if name == "" then name = "Imported" end
+        local taken = {}
+        for _, n in ipairs(self:ListConfigs()) do taken[n:lower()] = true end
+        local final, i = name, 2
+        while taken[final:lower()] do final = name .. " " .. i i = i + 1 end -- "name 2", "name 3"
+        Ensure()
+        local ok, err = pcall(function() writefile(CPath(final), HttpService:JSONEncode(clean)) end)
+        if not ok then return false, tostring(err) end
+        pcall(function() local dd = Lib.Options.__ConfigList if dd then dd:SetValues(Lib:ListConfigs()) end end)
+        return final
+end
+
+-- upload, then post a message that references it (same two-step flow as images)
+function Chat:ShareConfig(name, data)
+        if self.Blocked or not self.Request then return end
+        if os.clock() - self.LastSend < 0.8 then self:System("Slow down a little.") return end
+        local json = HttpService:JSONEncode(data)
+        if #json > 60000 then Lib:Notify({ Title = "Config", Text = "That config is too big to share.", Type = "error" }) return end
+        self.LastSend = os.clock()
+        local caption = Trim(self.Input.Text)
+        local replyId = self.ReplyTo and self.ReplyTo.id or nil
+        Lib:Notify({ Title = "Config", Text = "Sharing...", Type = "info", Duration = 2 })
+        task.spawn(function()
+                local d = Decode(self:_Do("/cfgup", nil, "POST", HttpService:JSONEncode({ name = name, data = json })))
+                if not (d and d.ok and d.id) then self:System((d and d.error) or "Couldn't share the config. Is your worker updated?") return end
+                self.Input.Text = ""
+                self:SetReply(nil)
+                self.Stick = true
+                local r = Decode(self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = caption:sub(1, self.Config.MaxLength), replyTo = replyId, cfg = d.id })))
+                if not (r and r.ok) then self:System((r and r.error) or "Couldn't post the config.") return end
+                self:_PollOnce()
+                Lib:Notify({ Title = "Config", Text = "Shared «" .. name .. "» in chat.", Type = "success", Duration = 2.5 })
+        end)
+end
+
+-- shares the selected saved config, or your current settings if none is selected
+function Lib:ShareConfigToChat(saved)
+        local chat = self.ChatObj
+        if not chat or not chat.Alive then self:Notify({ Title = "Config", Text = "Open the chat first.", Type = "warn" }) return end
+        local data, name
+        if saved and saved ~= "" then
+                name = Sanitize(saved)
+                local ok, raw = pcall(function() return readfile(CPath(name)) end)
+                local dec, d = false, nil
+                if ok then dec, d = pcall(HttpService.JSONDecode, HttpService, raw) end
+                if not (dec and type(d) == "table") then self:Notify({ Title = "Config", Text = "Couldn't read that config.", Type = "error" }) return end
+                data = d
+        else
+                data = self:SerializeConfig()
+                local o = self.Options.__ConfigName
+                name = Sanitize(o and o.Value or "")
+                if name == "" then name = "Shared config" end
+        end
+        chat:ShareConfig(name, data)
+end
+
+-- the card inside a chat bubble
+function Lib:_BuildConfigCard(chat, parent, cfg, order)
+        local id = tostring(cfg.id or "")
+        local card = New("Frame", { Name = "ConfigCard", Size = UDim2.new(1, 0, 0, 50), LayoutOrder = order, BackgroundTransparency = 0.35, Theme = { BackgroundColor3 = "Bg" }, Parent = parent })
+        Corner(card, 6)
+        New("Frame", { Size = UDim2.new(0, 2, 1, -10), Position = UDim2.fromOffset(5, 5), Theme = { BackgroundColor3 = "Accent" }, Parent = card })
+        New("TextLabel", { Text = "CONFIG", TextSize = 10, Size = UDim2.new(1, -86, 0, 13), Position = UDim2.fromOffset(14, 5), TextXAlignment = LEFT, Theme = { TextColor3 = "Dim" }, Parent = card })
+        New("TextLabel", { Text = Short(cfg.name or "Config", 28), Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, -86, 0, 16), Position = UDim2.fromOffset(14, 18),
+                TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Text" }, Parent = card })
+        local sub = New("TextLabel", { Text = tonumber(cfg.n) and (math.floor(cfg.n) .. " settings") or "Shared config", TextSize = 10, Size = UDim2.new(1, -86, 0, 13),
+                Position = UDim2.fromOffset(14, 34), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "SubText" }, Parent = card })
+        local btn = New("TextButton", { Text = "Copy", Font = Lib.FontBold, TextSize = 12, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+                Size = UDim2.fromOffset(58, 28), BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+        Corner(btn, 6)
+
+        local busy, done = false, false
+        Press(btn, function()
+                if busy or done then return end
+                busy = true
+                btn.Text = "..."
+                task.spawn(function()
+                        local d = Decode(chat:_Do("/cfg", { id = id }))
+                        local data
+                        if d and d.ok and type(d.data) == "string" and #d.data <= 60000 then
+                                local dec, t = pcall(HttpService.JSONDecode, HttpService, d.data)
+                                if dec and type(t) == "table" then data = t end
+                        end
+                        if not btn.Parent then return end
+                        if not data then
+                                busy = false
+                                btn.Text = (d and d.error == "expired") and "Expired" or "Retry"
+                                Lib:Notify({ Title = "Config", Text = (d and d.error == "expired") and "That config has expired." or ((d and d.error) or "Couldn't fetch that config."), Type = "error" })
+                                return
+                        end
+                        if Lib.HasFS then
+                                local saved, err = Lib:ImportConfig(d.name or cfg.name, data)
+                                if saved then
+                                        done = true
+                                        btn.Text = "Saved"
+                                        sub.Text = "Saved as " .. saved
+                                        Lib:Notify({ Title = "Config", Text = "Added «" .. saved .. "» to your configs.", Type = "success" })
+                                else
+                                        busy = false
+                                        btn.Text = "Retry"
+                                        Lib:Notify({ Title = "Config", Text = err or "Couldn't save it.", Type = "error" })
+                                end
+                        elseif type(setclipboard) == "function" then
+                                setclipboard(HttpService:JSONEncode(data))
+                                done = true
+                                btn.Text = "Copied"
+                                Lib:Notify({ Title = "Config", Text = "No file access, so it was copied as text. Paste it under Configs > Import.", Type = "info", Duration = 5 })
+                        else
+                                busy = false
+                                btn.Text = "Retry"
+                                Lib:Notify({ Title = "Config", Text = "Your executor can neither save files nor copy text.", Type = "error" })
+                        end
+                end)
+        end)
+        Lib:AddTooltip(card, "Copy adds it to your saved configs. It doesn't apply it.")
+end
+
 function Lib:SetAutoload(name)
         if not self.HasFS then return false end
         Ensure()
@@ -6930,6 +7300,11 @@ function Lib:BuildSettingsTab(window)
                 else Lib:Notify({ Title = "Config", Text = "That isn't a valid config.", Type = "error" }) end
         end })
         share:AddButton({ Text = "Copy current config", Func = function() Copy(HttpService:JSONEncode(Lib:SerializeConfig()), "Config copied to clipboard") end })
+        share:AddButton({ Text = "Share in chat", Icon = "send", Tooltip = "Shares the selected saved config, or your current settings if none is selected.", Func = function()
+                local o = Lib.Options.__ConfigList
+                Lib:ShareConfigToChat(o and o.Value)
+        end })
+        Lib:BuildPinSettings(cfgTab:AddRightGroupbox("Pinned buttons", { Icon = "pin" }))
         local cfg = cfgTab:AddLeftGroupbox("Configuration", { Icon = "save" })
         if not Lib.HasFS then
                 cfg:AddCallout("Your executor doesn't expose file functions, so saving configs is disabled. Copy/paste still works.", "warn")
@@ -8157,5 +8532,1502 @@ end
 
 end
 -- ===================== end patch =====================
+
+-- ===================== Aether patch 4.3: motion + live search =====================
+-- Paste this block right above the final `return Lib` (after the "fullscreen v2" patch).
+-- It must live in the same file: it hooks file-local helpers (Tween, New, Corner, ...).
+do
+Lib.Fx = Lib.Fx or { Springs = true, Ripple = true, TabAnim = true }
+Lib.SpringPop = Lib.SpringPop or 0.94 -- panels / window pop in from this fraction of their size
+
+-- ==================== A) SPRING PHYSICS ====================
+do
+local Springs = {}
+local Owned = setmetatable({}, { __mode = "k" }) -- instances whose Position/Size ALWAYS spring (slider parts)
+Lib._SpringOwned = Owned
+local Preset = { Position = { 16, 0.55 }, Size = { 13, 0.72 }, Scale = { 15, 0.5 } } -- { frequency, damping ratio }
+local Tol = { n = { 0.002 }, u = { 0.002, 1.2, 0.002, 1.2 }, v = { 1.2, 1.2 } }
+local Eps = { n = { 0.0005 }, u = { 0.0008, 0.04, 0.0008, 0.04 }, v = { 0.04, 0.04 } }
+local ScaleIdx = { n = { 1 }, u = { 1, 3 }, v = {} }
+
+local function Pack(v)
+        local t = typeof(v)
+        if t == "number" then return { v }, "n"
+        elseif t == "UDim2" then return { v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset }, "u"
+        elseif t == "Vector2" then return { v.X, v.Y }, "v" end
+end
+
+local function Unpack(a, kind)
+        if kind == "n" then return a[1]
+        elseif kind == "u" then return UDim2.new(a[1], math.floor(a[2] + 0.5), a[3], math.floor(a[4] + 0.5)) end
+        return Vector2.new(a[1], a[2])
+end
+
+-- Lib.Spring(inst, prop, target, { Freq, Damping, Clamp01, From, OnDone })
+function Lib.Spring(inst, prop, target, o)
+        o = o or {}
+        local tgt, kind = Pack(target)
+        local okc, cur = pcall(function() return inst[prop] end)
+        local now = okc and Pack(cur)
+        if not (tgt and now) then
+                pcall(function() inst[prop] = target end)
+                if o.OnDone then Safe(o.OnDone) end
+                return { Cancel = function() end }
+        end
+        if o.From ~= nil then
+                local f = Pack(o.From)
+                if f then now = f pcall(function() inst[prop] = o.From end) end
+        end
+        local per = Springs[inst]
+        if not per then per = {} Springs[inst] = per end
+        local s = per[prop]
+        if s then
+                -- somebody wrote the property directly since the last frame: start from there, keep listeners
+                for i = 1, #now do
+                        if math.abs(now[i] - s.pos[i]) > Tol[kind][i] then
+                                s.pos, s.vel = now, {}
+                                for j = 1, #now do s.vel[j] = 0 end
+                                break
+                        end
+                end
+        else
+                s = { kind = kind, pos = now, vel = {}, done = {} }
+                for i = 1, #now do s.vel[i] = 0 end
+                per[prop] = s
+        end
+        local pr = Preset[prop] or { 14, 0.7 }
+        s.f, s.z, s.tgt, s.eps, s.lo, s.hi = o.Freq or pr[1], o.Damping or pr[2], tgt, Eps[kind], {}, {}
+        -- long slides (notifications, docking panels) settle without bounce so they never clip
+        if kind == "u" and prop == "Position" and not o.Damping
+                and math.max(math.abs(tgt[2] - s.pos[2]), math.abs(tgt[4] - s.pos[4])) > 120 then s.z = 1 end
+        -- shrinking sizes never undershoot (no negative sizes, header never dips below the minimized height)
+        if prop == "Size" then for i = 1, #tgt do if tgt[i] < s.pos[i] then s.lo[i] = tgt[i] end end end
+        if inst:IsA("UIScale") then s.lo[1] = 0 end
+        if o.Clamp01 then for _, i in ipairs(ScaleIdx[kind]) do s.lo[i], s.hi[i] = 0, 1 end end
+        if o.OnDone then table.insert(s.done, o.OnDone) end
+        return { Cancel = function() if per[prop] == s then per[prop] = nil end end }
+end
+
+function Lib.SpringCancel(inst, prop)
+        local per = Springs[inst]
+        if per then per[prop] = nil end
+end
+
+Lib:Connect(RunService.RenderStepped, function(dt)
+        if next(Springs) == nil then return end
+        dt = math.min(dt, 0.05)
+        local n = math.max(1, math.ceil(dt * 120))
+        local h = dt / n
+        local fire = {}
+        for inst, per in pairs(Springs) do
+                if inst.Parent == nil then
+                        Springs[inst] = nil
+                else
+                        for prop, s in pairs(per) do
+                                local ok, cur = pcall(function() return inst[prop] end)
+                                local now = ok and Pack(cur)
+                                local stop = not now
+                                if now then
+                                        for i = 1, #now do
+                                                -- the property was written by someone else: they win, we stop
+                                                if math.abs(now[i] - s.pos[i]) > Tol[s.kind][i] * 1.5 then stop = true break end
+                                        end
+                                end
+                                if stop then
+                                        per[prop] = nil
+                                        for _, fn in ipairs(s.done) do table.insert(fire, fn) end
+                                else
+                                        local settled = true
+                                        for i = 1, #s.pos do
+                                                local x, v, t = s.pos[i], s.vel[i], s.tgt[i]
+                                                for _ = 1, n do
+                                                        v = v + (-s.f * s.f * (x - t) - 2 * s.z * s.f * v) * h
+                                                        x = x + v * h
+                                                end
+                                                local lo, hi = s.lo[i], s.hi[i]
+                                                if lo and x < lo then x = lo if v < 0 then v = 0 end end
+                                                if hi and x > hi then x = hi if v > 0 then v = 0 end end
+                                                s.pos[i], s.vel[i] = x, v
+                                                if math.abs(x - t) > s.eps[i] or math.abs(v) > s.eps[i] * 25 then settled = false end
+                                        end
+                                        if settled then
+                                                for i = 1, #s.pos do s.pos[i], s.vel[i] = s.tgt[i], 0 end
+                                                per[prop] = nil
+                                                for _, fn in ipairs(s.done) do table.insert(fire, fn) end
+                                        end
+                                        pcall(function() inst[prop] = Unpack(s.pos, s.kind) end)
+                                end
+                        end
+                        if next(per) == nil then Springs[inst] = nil end
+                end
+        end
+        for _, fn in ipairs(fire) do Safe(fn) end
+end)
+
+-- Every Quint tween of Position / Size / UIScale.Scale in the library becomes a spring.
+-- Anything else (colors, transparency, CanvasPosition, Quad/Sine tweens) is untouched.
+local RawTween = Tween
+Tween = function(inst, props, d, style, dir)
+        if not (Lib.Fx.Springs and typeof(inst) == "Instance") then return RawTween(inst, props, d, style, dir) end
+        local owned = Owned[inst]
+        if not (owned or style == Enum.EasingStyle.Quint) then return RawTween(inst, props, d, style, dir) end
+        local rest, springs, count = {}, {}, 0
+        for k, v in pairs(props) do
+                if Preset[k] and (k ~= "Scale" or inst:IsA("UIScale")) then springs[k] = v count = count + 1 else rest[k] = v end
+        end
+        if count == 0 then return RawTween(inst, props, d, style, dir) end
+        local real = next(rest) ~= nil and RawTween(inst, rest, d, style, dir) or nil
+        local shim, left, handles = { Completed = Signal.new() }, count, {}
+        for k, v in pairs(springs) do
+                local o = { Clamp01 = owned and true or nil, OnDone = function()
+                        left = left - 1
+                        if left == 0 then shim.Completed:Fire() end
+                end }
+                if k == "Scale" and typeof(v) == "number" and inst.Scale < v then o.From = v * Lib.SpringPop end
+                table.insert(handles, Lib.Spring(inst, k, v, o))
+        end
+        function shim:Cancel() for _, h2 in ipairs(handles) do h2.Cancel() end end
+        function shim:Play() end
+        function shim:Pause() end
+        return real or shim
+end
+Lib.Tween = Tween
+
+-- Sliders: the fill + knob chase the value with a spring, also while dragging.
+local origSlider = Elements.AddSlider
+Elements.AddSlider = function(self, idx, info)
+        local obj = origSlider(self, idx, info)
+        pcall(function()
+                local track = obj.Row:FindFirstChildWhichIsA("Frame")
+                local parts = {}
+                for _, c in ipairs(track:GetChildren()) do if c:IsA("Frame") then table.insert(parts, c) end end
+                local fill, knob = parts[1], parts[2]
+                if not (fill and knob) then return end
+                Owned[fill], Owned[knob] = true, true
+                local rawSet = obj.SetValue
+                local function Cur(inst, prop)
+                        local s = Springs[inst] and Springs[inst][prop]
+                        return s and Unpack(s.pos, s.kind) or inst[prop]
+                end
+                obj.SetValue = function(me, v, silent)
+                        if not Lib.Fx.Springs then return rawSet(me, v, silent) end
+                        local pk, pf = Cur(knob, "Position"), Cur(fill, "Size")
+                        rawSet(me, v, silent) -- Render() may have written the final value straight onto the frames while dragging
+                        local r = Clamp(Map(me.Value, me.Min, me.Max, 0, 1), 0, 1)
+                        knob.Position, fill.Size = pk, pf
+                        Lib.Spring(knob, "Position", UDim2.fromScale(r, 0.5), { Clamp01 = true })
+                        Lib.Spring(fill, "Size", UDim2.fromScale(r, 1), { Clamp01 = true })
+                end
+        end)
+        return obj
+end
+end
+
+-- ==================== B) RIPPLE CLICK EFFECT ====================
+do
+local function Ripple(btn, input, padL, padT, radius)
+        local abs, sz = btn.AbsolutePosition, btn.AbsoluteSize
+        if sz.X < 2 or sz.Y < 2 then return end
+        local sc = math.max(Lib.Scale, 0.01)
+        local p = (Pointer(input) - abs) / sc -- exact click point, in the button's own (unscaled) pixels
+        local w, h = sz.X / sc, sz.Y / sc
+        local ok, cg = pcall(function() return Instance.new("CanvasGroup") end)
+        if not ok then return end
+        cg.Name, cg.BackgroundTransparency, cg.BorderSizePixel, cg.ZIndex = "Ripple", 1, 0, 5
+        cg.Size, cg.Position = UDim2.fromOffset(w, h), UDim2.fromOffset(-padL, -padT) -- undo the button's UIPadding
+        cg.Parent = btn
+        Corner(cg, radius) -- a CanvasGroup clips to the rounded corners
+        local far = math.max(math.sqrt(p.X ^ 2 + p.Y ^ 2), math.sqrt((w - p.X) ^ 2 + p.Y ^ 2),
+                math.sqrt(p.X ^ 2 + (h - p.Y) ^ 2), math.sqrt((w - p.X) ^ 2 + (h - p.Y) ^ 2))
+        local dot = New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(p.X, p.Y), Size = UDim2.fromOffset(0, 0),
+                BackgroundColor3 = Lib.Theme.Accent, BackgroundTransparency = 0.7, Parent = cg })
+        New("UICorner", { CornerRadius = UDim.new(0.5, 0), Parent = dot })
+        Tween(dot, { Size = UDim2.fromOffset(far * 2 + 4, far * 2 + 4) }, 0.5, Enum.EasingStyle.Quart)
+        Tween(dot, { BackgroundTransparency = 1 }, 0.6, Enum.EasingStyle.Sine)
+        task.delay(0.65, function() if cg.Parent then cg:Destroy() end end)
+end
+
+-- Lib.AddRipple(button, padLeft, padTop, cornerRadius, canFire)
+function Lib.AddRipple(btn, padL, padT, radius, can)
+        btn.InputBegan:Connect(function(input)
+                if not (Lib.Fx.Ripple and IsPress(input)) then return end
+                if can and not can() then return end
+                pcall(Ripple, btn, input, padL or 0, padT or 0, radius or 5)
+        end)
+end
+
+local origButton = Elements.AddButton
+Elements.AddButton = function(self, a, b)
+        local obj = origButton(self, a, b)
+        pcall(function()
+                local btn = obj.Row:FindFirstChildWhichIsA("TextButton")
+                if not btn then return end
+                local old = btn:FindFirstChildWhichIsA("Frame") -- the old fixed-position flash, replaced by the ripple
+                if old then old.Visible = false end
+                Lib.AddRipple(btn, obj.Info.Icon and 30 or 10, 3, 5, function() return not obj.Info.Disabled end)
+        end)
+        return obj
+end
+
+local origRow = Elements.AddButtonRow
+Elements.AddButtonRow = function(self, buttons)
+        local out = origRow(self, buttons)
+        for _, b in ipairs(out or {}) do Lib.AddRipple(b, 8, 2, 5) end
+        return out
+end
+end
+
+-- ==================== C) DIRECTIONAL TAB TRANSITIONS ====================
+do
+local origSelect = Window.SelectTab
+function Window:SelectTab(tab)
+        local prev = self.ActiveTab
+        origSelect(self, tab)
+        if not (Lib.Fx.TabAnim and prev and tab and prev ~= tab) or self.Minimized or Lib.Unloaded then return end
+        local a, b = IndexOf(self.Tabs, prev), IndexOf(self.Tabs, tab)
+        if not (a and b) then return end
+        -- lower in the rail -> the page rises in from below; higher -> it slides down from above
+        local dir = b > a and 1 or -1
+        local sc = tab.Scroll
+        Lib.SpringCancel(sc, "Position")
+        sc.Position = UDim2.fromOffset(0, 30 * dir)
+        Lib.Spring(sc, "Position", UDim2.new(), { Freq = 15, Damping = 0.62 })
+        local fade = self._tabFade
+        if not (fade and fade.Parent) then
+                fade = New("Frame", { Name = "TabFade", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 50,
+                        Theme = { BackgroundColor3 = "Bg" }, Parent = self.Pages })
+                self._tabFade = fade
+        end
+        fade.BackgroundTransparency = 0.45
+        Tween(fade, { BackgroundTransparency = 1 }, 0.28)
+end
+end
+
+-- ==================== D) LIVE SEARCH WITH INLINE ACTIONS ====================
+do
+local function SFmt(o, v)
+        local i = o.Info or {}
+        if i.Display then
+                local ok, r = pcall(i.Display, v)
+                return ok and tostring(r) or tostring(v)
+        end
+        local rd = i.Rounding or 0
+        local s = rd > 0 and string.format("%." .. rd .. "f", v) or tostring(math.floor(v + 0.5))
+        return (i.Prefix or "") .. s .. (i.Suffix or "")
+end
+
+local Reserve = { Toggle = 52, Button = 64, Segmented = 128, Dropdown = 128, Slider = 90 }
+
+function Window:_BuildSearch(field, clear)
+        local win, box = self, self.SearchBox
+        local results = Sink(New("Frame", { Visible = false, BackgroundTransparency = 0, ZIndex = 90, Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+        Corner(results, 6) Stroke(results)
+        local rlist = New("ScrollingFrame", { Size = UDim2.new(1, -8, 1, -8), Position = UDim2.fromOffset(4, 4), ZIndex = 91, ScrollBarThickness = 2, AutomaticCanvasSize = Y, Parent = results })
+        List(rlist, 2)
+        local first, live = nil, {}
+        local function Drop() for _, c in ipairs(live) do pcall(function() c:Disconnect() end) end live = {} end
+        local function Hide() results.Visible = false rlist.ScrollingEnabled = true Drop() end
+        local function Pick(gb, e)
+                Hide()
+                if Lib.Popup and Lib.Popup.Frame == results then Lib.Popup = nil end
+                box.Text = ""
+                pcall(function() box:ReleaseFocus() end)
+                task.defer(function() pcall(function() win:Goto(gb, e.row) end) end)
+        end
+
+        -- builds one result row; returns its height
+        local function Build(n, tab, sub, gb, e)
+                local o = e.obj
+                local kind, info = o.Type, o.Info or {}
+                local can = not info.Disabled and (kind == "Toggle" or kind == "Slider" or kind == "Button" or kind == "Segmented"
+                        or (kind == "Dropdown" and not info.Multi))
+                local hgt = (can and kind == "Slider") and 58 or 38
+                local reserve = can and Reserve[kind] or 12
+                local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, hgt), LayoutOrder = n, ZIndex = 92, Theme = { BackgroundColor3 = "Field" }, Parent = rlist })
+                Corner(b, 4)
+                New("TextLabel", { Text = e.name, TextSize = 13, Size = UDim2.new(1, -(8 + reserve), 0, 16), Position = UDim2.fromOffset(8, 3), TextXAlignment = LEFT, ZIndex = 93,
+                        TextTruncate = Enum.TextTruncate.AtEnd, Parent = b })
+                New("TextLabel", { Text = tab.Name .. " › " .. sub.Name .. " › " .. gb.Name, TextSize = 10, Size = UDim2.new(1, -(8 + reserve), 0, 12), Position = UDim2.fromOffset(8, 20),
+                        TextXAlignment = LEFT, ZIndex = 93, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = b })
+                b.MouseEnter:Connect(function() Tween(b, { BackgroundColor3 = Lib.Theme.FieldHover }, 0.06) end)
+                b.MouseLeave:Connect(function() Tween(b, { BackgroundColor3 = Lib.Theme.Field }, 0.08) end)
+                local fired = false
+                local function Go() if fired then return end fired = true Pick(gb, e) end
+                b.InputBegan:Connect(function(i) if IsPress(i) then Go() end end)
+                b.Activated:Connect(Go)
+                if not can then return hgt end
+
+                if kind == "Toggle" then
+                        local tw, th = 30, 16
+                        local kn = th - 6
+                        local sw = New("TextButton", { Text = "", Size = UDim2.fromOffset(tw + 12, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -4, 0.5, 0), ZIndex = 93, Parent = b })
+                        local tr = New("Frame", { Size = UDim2.fromOffset(tw, th), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 94,
+                                BackgroundColor3 = Lib.Theme.Stroke, Parent = sw })
+                        Corner(tr, th / 2)
+                        local kb = New("Frame", { Size = UDim2.fromOffset(kn, kn), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), ZIndex = 95,
+                                BackgroundColor3 = Lib.Theme.Dim, Parent = tr })
+                        Corner(kb, kn / 2)
+                        local function Paint(anim)
+                                local on = o.Value == true
+                                local tc = on and Lib.Theme.Accent or Lib.Theme.Stroke
+                                local kp = UDim2.new(0, on and (tw - kn - 3) or 3, 0.5, 0)
+                                local kc = on and Lib.KnobOn() or Lib.Theme.Dim
+                                if anim then
+                                        Tween(tr, { BackgroundColor3 = tc }, 0.14)
+                                        Tween(kb, { Position = kp, BackgroundColor3 = kc }, 0.18, Enum.EasingStyle.Quint)
+                                else
+                                        tr.BackgroundColor3, kb.Position, kb.BackgroundColor3 = tc, kp, kc
+                                end
+                        end
+                        Paint(false)
+                        table.insert(live, o.Changed:Connect(function() Paint(true) end))
+                        sw.Activated:Connect(function() o:SetValue(not o.Value) end)
+
+                elseif kind == "Slider" then
+                        local vl = New("TextLabel", { Text = "", TextSize = 12, Size = UDim2.fromOffset(78, 16), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 3),
+                                TextXAlignment = RIGHT, ZIndex = 93, Parent = b })
+                        local tr = New("Frame", { Size = UDim2.new(1, -16, 0, 4), Position = UDim2.new(0, 8, 1, -14), ZIndex = 93, BackgroundColor3 = Lib.Theme.Stroke, Parent = b })
+                        Corner(tr, 2)
+                        local fl = New("Frame", { Size = UDim2.fromScale(0, 1), ZIndex = 94, Theme = { BackgroundColor3 = "Accent" }, Parent = tr })
+                        Corner(fl, 2)
+                        local kn = New("Frame", { Size = UDim2.fromOffset(6, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), ZIndex = 95, BackgroundColor3 = WHITE, Parent = tr })
+                        Corner(kn, 2)
+                        if Lib._SpringOwned then Lib._SpringOwned[fl], Lib._SpringOwned[kn] = true, true end
+                        local function Paint(anim)
+                                local r = Clamp(Map(o.Value, o.Min, o.Max, 0, 1), 0, 1)
+                                vl.Text = SFmt(o, o.Value)
+                                if anim then
+                                        Tween(fl, { Size = UDim2.fromScale(r, 1) }, 0.1)
+                                        Tween(kn, { Position = UDim2.fromScale(r, 0.5) }, 0.1)
+                                else
+                                        fl.Size, kn.Position = UDim2.fromScale(r, 1), UDim2.fromScale(r, 0.5)
+                                end
+                        end
+                        Paint(false)
+                        table.insert(live, o.Changed:Connect(function() Paint(true) end))
+                        local hit = New("TextButton", { Text = "", Size = UDim2.new(1, -8, 0, 24), Position = UDim2.fromOffset(4, 32), ZIndex = 96, Parent = b })
+                        hit.InputBegan:Connect(function(input)
+                                if not IsPress(input) then return end
+                                local isTouch = input.UserInputType == Enum.UserInputType.Touch
+                                rlist.ScrollingEnabled = false
+                                local function From(pos)
+                                        o:SetValue(Lerp(o.Min, o.Max, Clamp((pos.X - tr.AbsolutePosition.X) / math.max(tr.AbsoluteSize.X, 1), 0, 1)))
+                                end
+                                From(Pointer(input))
+                                local mc, ec
+                                mc = UIS.InputChanged:Connect(function(i)
+                                        if isTouch then if i == input then From(Pointer(i)) end
+                                        elseif i.UserInputType == Enum.UserInputType.MouseMovement then From(Pointer(i)) end
+                                end)
+                                ec = UIS.InputEnded:Connect(function(i)
+                                        local fin = isTouch and (i == input) or (not isTouch and i.UserInputType == Enum.UserInputType.MouseButton1)
+                                        if fin then rlist.ScrollingEnabled = true mc:Disconnect() ec:Disconnect() end
+                                end)
+                        end)
+
+                elseif kind == "Button" then
+                        local armed = false
+                        local rb = New("TextButton", { Text = "Run", TextSize = 12, Size = UDim2.fromOffset(52, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+                                BackgroundTransparency = 0, ZIndex = 93, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = b })
+                        Corner(rb, 4)
+                        Lib.AddRipple(rb, 0, 0, 4)
+                        rb.Activated:Connect(function()
+                                if info.DoubleClick and not armed then
+                                        armed = true
+                                        rb.Text = "Sure?"
+                                        task.delay(2, function() if armed and rb.Parent then armed = false rb.Text = "Run" end end)
+                                        return
+                                end
+                                armed = false
+                                o:Click()
+                                rb.Text = "Done"
+                                task.delay(0.9, function() if rb.Parent then rb.Text = "Run" end end)
+                        end)
+
+                else -- Segmented / single Dropdown: < value >
+                        local holder = New("Frame", { Size = UDim2.fromOffset(118, 24), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0), BackgroundTransparency = 1, ZIndex = 93, Parent = b })
+                        local val = New("TextLabel", { Text = "", TextSize = 12, Size = UDim2.new(1, -44, 1, 0), Position = UDim2.fromOffset(22, 0), ZIndex = 94,
+                                TextTruncate = Enum.TextTruncate.AtEnd, Parent = holder })
+                        local function Paint() val.Text = o.Value ~= nil and tostring(o.Value) or "-" end
+                        Paint()
+                        table.insert(live, o.Changed:Connect(Paint))
+                        local function Step(d)
+                                local list = o.Values or {}
+                                if #list == 0 then return end
+                                local i = IndexOf(list, o.Value) or (d > 0 and 0 or 1)
+                                o:SetValue(list[(i - 1 + d) % #list + 1])
+                        end
+                        for _, def in ipairs({ { "<", 0, -1 }, { ">", 1, 1 } }) do
+                                local sb = New("TextButton", { Text = def[1], TextSize = 13, Size = UDim2.fromOffset(20, 22), AnchorPoint = Vector2.new(def[2], 0.5), Position = UDim2.new(def[2], 0, 0.5, 0),
+                                        BackgroundTransparency = 0, ZIndex = 94, Theme = { BackgroundColor3 = "FieldHover", TextColor3 = "SubText" }, Parent = holder })
+                                Corner(sb, 4)
+                                Lib.AddRipple(sb, 0, 0, 4)
+                                sb.Activated:Connect(function() Step(def[3]) end)
+                        end
+                end
+                return hgt
+        end
+
+        local function Rebuild()
+                Drop()
+                for _, c in ipairs(rlist:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
+                first = nil
+                local q = box.Text:lower()
+                clear.Visible = q ~= ""
+                if q == "" then Hide() return end
+                local n, total = 0, 8
+                for _, tab in ipairs(win.Tabs) do for _, sub in ipairs(tab.Subs) do for _, gb in ipairs(sub.Groupboxes) do
+                        for _, e in ipairs(gb.Entries) do
+                                if n < 12 and not e.static and (e.text:find(q, 1, true) or gb.Name:lower():find(q, 1, true)) then
+                                        n = n + 1
+                                        if not first then first = { gb, e } end
+                                        local hgt = Build(n, tab, sub, gb, e)
+                                        if n <= 7 then total = total + hgt + 2 end
+                                end
+                        end
+                end end end
+                if n == 0 then
+                        New("TextLabel", { Text = "No matches", TextSize = 12, Size = UDim2.new(1, 0, 0, 30), ZIndex = 92, Theme = { TextColor3 = "Dim" }, Parent = rlist })
+                        total = 46
+                end
+                local w = Clamp(math.max(field.AbsoluteSize.X, 290), 220, Lib.Overlay.AbsoluteSize.X - 8)
+                local pos, hh = PlaceBelow(field, w, math.min(total, 340), 4, true)
+                results.Size = UDim2.fromOffset(w, hh)
+                results.Position = UDim2.fromOffset(pos.X, pos.Y)
+                if not results.Visible then
+                        results.Visible = true
+                        Lib:OpenPopup(results, Hide, field, true)
+                end
+        end
+        box:GetPropertyChangedSignal("Text"):Connect(Rebuild)
+        box.FocusLost:Connect(function(enter) if enter and first then Pick(first[1], first[2]) end end)
+end
+end
+
+-- ==================== E) "Motion" switches in Settings > Interface ====================
+do
+local origSettings = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = origSettings(self, window)
+        if tab and not tab._motionUI then
+                tab._motionUI = true
+                pcall(function()
+                        local gb = tab.Subs[1]:AddLeftGroupbox("Motion", { Icon = "wind" })
+                        gb:AddToggle("FxSprings", { Text = "Spring animations", Default = Lib.Fx.Springs, Callback = function(v) Lib.Fx.Springs = v end })
+                        gb:AddToggle("FxRipple", { Text = "Click ripple", Default = Lib.Fx.Ripple, Callback = function(v) Lib.Fx.Ripple = v end })
+                        gb:AddToggle("FxTabAnim", { Text = "Tab transitions", Default = Lib.Fx.TabAnim, Callback = function(v) Lib.Fx.TabAnim = v end })
+                end)
+        end
+        return tab
+end
+end
+
+end
+-- ===================== end patch 4.3 =====================
+
+-- ===================== Aether patch 4.4 =====================
+do
+local PrevClamp = Window.Clamp
+
+-- ---------- 1) ripples off, quick flash back on buttons ----------
+Lib.Fx.Ripple = false
+Lib.AddRipple = function() end
+
+local prevButton = Elements.AddButton
+Elements.AddButton = function(self, a, b)
+        local obj = prevButton(self, a, b)
+        pcall(function()
+                local btn = obj.Row:FindFirstChildWhichIsA("TextButton")
+                local flash = btn and btn:FindFirstChildWhichIsA("Frame")
+                if flash then flash.Visible = true end
+        end)
+        return obj
+end
+
+-- ---------- 2) free dragging ----------
+function Lib:MakeDraggable(handle, target, opts)
+        opts = opts or {}
+        handle.InputBegan:Connect(function(input)
+                if not IsPress(input) then return end
+                if opts.Check and not opts.Check() then return end
+                local isTouch = input.UserInputType == Enum.UserInputType.Touch
+                local function Raw(i)
+                        if isTouch then return Vector2.new(i.Position.X, i.Position.Y) end
+                        return UIS:GetMouseLocation()
+                end
+                local start, startPos, abs0 = Raw(input), target.Position, target.AbsolutePosition
+                local hBot = (handle.AbsolutePosition.Y - abs0.Y) + handle.AbsoluteSize.Y
+                local threshold = isTouch and 6 or 3
+                local moved, mc, ec = false, nil, nil
+                mc = UIS.InputChanged:Connect(function(i)
+                        if isTouch then
+                                if i ~= input then return end
+                        elseif i.UserInputType ~= Enum.UserInputType.MouseMovement then
+                                return
+                        end
+                        local d = Raw(i) - start
+                        if not moved then
+                                if d.Magnitude < threshold then return end
+                                moved = true
+                                if opts.OnMove then Safe(opts.OnMove) end
+                        end
+                        local vp, sz = GetViewport(), target.AbsoluteSize
+                        local nx = Clamp(abs0.X + d.X, 40 - sz.X, vp.X - 40)
+                        local ny = Clamp(abs0.Y + d.Y, 12 - hBot, vp.Y - 24)
+                        target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + (nx - abs0.X), startPos.Y.Scale, startPos.Y.Offset + (ny - abs0.Y))
+                end)
+                ec = UIS.InputEnded:Connect(function(i)
+                        local fin = isTouch and (i == input) or (not isTouch and i.UserInputType == Enum.UserInputType.MouseButton1)
+                        if fin then
+                                mc:Disconnect() ec:Disconnect()
+                                if moved and opts.OnEnd then Safe(opts.OnEnd) end
+                                if not moved and opts.OnTap then Safe(opts.OnTap) end
+                        end
+                end)
+        end)
+end
+
+function Window:Clamp(strict)
+        if self.Fullscreen then return PrevClamp(self, strict) end
+        if strict and self.Dragged then strict = false end -- once you placed it, stop pulling it back
+        if strict then return PrevClamp(self, true) end
+        local vp, s = GetViewport(), Lib.Scale
+        local sz = Vector2.new(self.W * s, self.H * s)
+        local pos = self.Main.Position
+        local x = Clamp(pos.X.Offset, 44 - sz.X, vp.X - 44)
+        local y = Clamp(pos.Y.Offset, 10 - 46 * s, vp.Y - 24)
+        if x ~= pos.X.Offset or y ~= pos.Y.Offset then
+                self.Main.Position = UDim2.new(pos.X.Scale, x, pos.Y.Scale, y)
+        end
+end
+
+-- ---------- 3) touch calibration ----------
+local calLoaded = false
+local function CalPath() return Lib.ConfigFolder .. "/touchcal.json" end
+local function LoadCal()
+        if calLoaded then return end
+        calLoaded = true
+        if not FsOk() then return end
+        pcall(function()
+                local p = CalPath()
+                if isfile(p) then
+                        local d = HttpService:JSONDecode(readfile(p))
+                        if type(d) == "table" and tonumber(d.x) and tonumber(d.y) then Lib.TouchCal = Vector2.new(d.x, d.y) end
+                end
+        end)
+end
+
+Pointer = function(input)
+        if input and input.UserInputType == Enum.UserInputType.Touch then
+                LoadCal()
+                local cal = Lib.TouchCal
+                if cal then return Vector2.new(input.Position.X + cal.X, input.Position.Y + cal.Y) end
+                return Vector2.new(input.Position.X, input.Position.Y + (Lib.TouchDY or GuiService:GetGuiInset().Y))
+        end
+        return UIS:GetMouseLocation() + Lib.PtrShift
+end
+Lib.Pointer = Pointer
+
+function Lib:CalibrateTouch()
+        local ov = New("TextButton", { Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.35, BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = 200, Parent = self.Overlay })
+        local label = New("TextLabel", { Text = "Tap the center of the circle (1/3)", TextSize = 15, Font = Lib.FontBold, Size = UDim2.new(1, 0, 0, 24),
+                AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.fromScale(0.5, 0.3), ZIndex = 201, Parent = ov })
+        local target = New("Frame", { Size = UDim2.fromOffset(40, 40), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 201,
+                Theme = { BackgroundColor3 = "Accent" }, Parent = ov })
+        Corner(target, 20)
+        local dot = New("Frame", { Size = UDim2.fromOffset(6, 6), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 202, BackgroundColor3 = WHITE, Parent = target })
+        Corner(dot, 3)
+        local cancel = New("TextButton", { Text = "Cancel", TextSize = 13, Size = UDim2.fromOffset(70, 28), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0.75),
+                BackgroundTransparency = 0, ZIndex = 203, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = ov })
+        Corner(cancel, 5)
+        cancel.Activated:Connect(function() ov:Destroy() end)
+        local spots, taps = { Vector2.new(0.5, 0.5), Vector2.new(0.3, 0.42), Vector2.new(0.7, 0.58) }, {}
+        ov.InputBegan:Connect(function(input)
+                if input.UserInputType ~= Enum.UserInputType.Touch then return end
+                local c = target.AbsolutePosition + target.AbsoluteSize / 2
+                local off = Vector2.new(c.X - input.Position.X, c.Y - input.Position.Y)
+                if math.abs(off.X) > 160 or math.abs(off.Y) > 160 then label.Text = "Tap the circle itself" return end
+                table.insert(taps, off)
+                if #taps < 3 then
+                        local s = spots[#taps + 1]
+                        target.Position = UDim2.fromScale(s.X, s.Y)
+                        label.Position = UDim2.fromScale(0.5, s.Y - 0.12)
+                        label.Text = "Again (" .. (#taps + 1) .. "/3)"
+                        return
+                end
+                local sx, sy = 0, 0
+                for _, t in ipairs(taps) do sx, sy = sx + t.X, sy + t.Y end
+                Lib.TouchCal = Vector2.new(sx / #taps, sy / #taps)
+                pcall(function()
+                        Ensure()
+                        writefile(CalPath(), HttpService:JSONEncode({ x = Lib.TouchCal.X, y = Lib.TouchCal.Y }))
+                end)
+                ov:Destroy()
+                Lib:Notify({ Title = "Touch", Text = "Calibrated (" .. math.floor(Lib.TouchCal.Y + 0.5) .. "px offset). Saved.", Type = "success" })
+        end)
+end
+
+function Lib:ResetTouchCal()
+        Lib.TouchCal = nil
+        calLoaded = true
+        pcall(function() if isfile(CalPath()) and type(delfile) == "function" then delfile(CalPath()) end end)
+        Lib:Notify({ Title = "Touch", Text = "Calibration reset to automatic.", Type = "info" })
+end
+
+-- outside-tap detection for the search popup: slack around it, and the on-screen keyboard never counts as "outside"
+IsOver = function(frame, pos)
+        if not frame or not frame.Parent then return false end
+        local m = pos or Pointer()
+        local pad = 0
+        local p = Lib.Popup
+        if p and p.NoCatch and (frame == p.Frame or frame == p.Ignore) then
+                pad = 12
+                if UIS.OnScreenKeyboardVisible then
+                        local kp = UIS.OnScreenKeyboardPosition
+                        if kp.Y > 0 and m.Y >= kp.Y - 60 then return true end
+                end
+        end
+        local ap, as = frame.AbsolutePosition, frame.AbsoluteSize
+        return m.X >= ap.X - pad and m.X <= ap.X + as.X + pad and m.Y >= ap.Y - pad and m.Y <= ap.Y + as.Y + pad
+end
+Lib.IsOver = IsOver
+
+-- ---------- 4) search popup: touch friendly + keyboard aware ----------
+do
+local function SFmt(o, v)
+        local i = o.Info or {}
+        if i.Display then
+                local ok, r = pcall(i.Display, v)
+                return ok and tostring(r) or tostring(v)
+        end
+        local rd = i.Rounding or 0
+        local s = rd > 0 and string.format("%." .. rd .. "f", v) or tostring(math.floor(v + 0.5))
+        return (i.Prefix or "") .. s .. (i.Suffix or "")
+end
+local Reserve = { Toggle = 52, Button = 64, Segmented = 128, Dropdown = 128, Slider = 90 }
+
+function Window:_BuildSearch(field, clear)
+        local win, box = self, self.SearchBox
+        local results = Sink(New("Frame", { Visible = false, BackgroundTransparency = 0, ZIndex = 90, Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+        Corner(results, 6) Stroke(results)
+        local rlist = New("ScrollingFrame", { Size = UDim2.new(1, -8, 1, -8), Position = UDim2.fromOffset(4, 4), ZIndex = 91, ScrollBarThickness = 2, AutomaticCanvasSize = Y, Parent = results })
+        List(rlist, 2)
+        local first, live, total, pressAt = nil, {}, 8, 0
+        local function Drop() for _, c in ipairs(live) do pcall(function() c:Disconnect() end) end live = {} end
+        local function Hide() results.Visible = false rlist.ScrollingEnabled = true Drop() end
+
+        local function Place()
+                local w = Clamp(math.max(field.AbsoluteSize.X, 290), 220, Lib.Overlay.AbsoluteSize.X - 8)
+                local bounds
+                if UIS.OnScreenKeyboardVisible then
+                        local kp = UIS.OnScreenKeyboardPosition
+                        if kp.Y > 0 then
+                                local o, vp = OverlayOrigin(), Lib.Overlay.AbsoluteSize
+                                bounds = { 4, 4, vp.X - 4, math.max(140, kp.Y - o.Y - 6) }
+                        end
+                end
+                local pos, hh = PlaceBelow(field, w, math.min(total, 340), 4, true, bounds)
+                results.Size = UDim2.fromOffset(w, hh)
+                results.Position = UDim2.fromOffset(pos.X, pos.Y)
+        end
+
+        local function Pick(gb, e)
+                Hide()
+                if Lib.Popup and Lib.Popup.Frame == results then Lib.Popup = nil end
+                box.Text = ""
+                pcall(function() box:ReleaseFocus() end)
+                task.defer(function() pcall(function() win:Goto(gb, e.row) end) end)
+        end
+
+        local function Build(n, tab, sub, gb, e)
+                local o = e.obj
+                local kind, info = o.Type, o.Info or {}
+                local can = not info.Disabled and (kind == "Toggle" or kind == "Slider" or kind == "Button" or kind == "Segmented"
+                        or (kind == "Dropdown" and not info.Multi))
+                local hgt = (can and kind == "Slider") and 58 or 38
+                local reserve = can and Reserve[kind] or 12
+                local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, hgt), LayoutOrder = n, ZIndex = 92, Theme = { BackgroundColor3 = "Field" }, Parent = rlist })
+                Corner(b, 4)
+                New("TextLabel", { Text = e.name, TextSize = 13, Size = UDim2.new(1, -(8 + reserve), 0, 16), Position = UDim2.fromOffset(8, 3), TextXAlignment = LEFT, ZIndex = 93,
+                        TextTruncate = Enum.TextTruncate.AtEnd, Parent = b })
+                New("TextLabel", { Text = tab.Name .. " › " .. sub.Name .. " › " .. gb.Name, TextSize = 10, Size = UDim2.new(1, -(8 + reserve), 0, 12), Position = UDim2.fromOffset(8, 20),
+                        TextXAlignment = LEFT, ZIndex = 93, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = b })
+                b.MouseEnter:Connect(function() Tween(b, { BackgroundColor3 = Lib.Theme.FieldHover }, 0.06) end)
+                b.MouseLeave:Connect(function() Tween(b, { BackgroundColor3 = Lib.Theme.Field }, 0.08) end)
+                -- pick on RELEASE only, so scrolling / aiming with a finger never jumps away
+                local fired = false
+                b.InputBegan:Connect(function(i) if IsPress(i) then pressAt = os.clock() end end)
+                b.Activated:Connect(function() if fired then return end fired = true Pick(gb, e) end)
+                if not can then return hgt end
+
+                if kind == "Toggle" then
+                        local tw, th = 30, 16
+                        local kn = th - 6
+                        local sw = New("TextButton", { Text = "", Size = UDim2.fromOffset(tw + 12, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -4, 0.5, 0), ZIndex = 93, Parent = b })
+                        local tr = New("Frame", { Size = UDim2.fromOffset(tw, th), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 94, BackgroundColor3 = Lib.Theme.Stroke, Parent = sw })
+                        Corner(tr, th / 2)
+                        local kb = New("Frame", { Size = UDim2.fromOffset(kn, kn), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), ZIndex = 95, BackgroundColor3 = Lib.Theme.Dim, Parent = tr })
+                        Corner(kb, kn / 2)
+                        local function Paint(anim)
+                                local on = o.Value == true
+                                local tc = on and Lib.Theme.Accent or Lib.Theme.Stroke
+                                local kp = UDim2.new(0, on and (tw - kn - 3) or 3, 0.5, 0)
+                                local kc = on and Lib.KnobOn() or Lib.Theme.Dim
+                                if anim then
+                                        Tween(tr, { BackgroundColor3 = tc }, 0.14)
+                                        Tween(kb, { Position = kp, BackgroundColor3 = kc }, 0.18, Enum.EasingStyle.Quint)
+                                else
+                                        tr.BackgroundColor3, kb.Position, kb.BackgroundColor3 = tc, kp, kc
+                                end
+                        end
+                        Paint(false)
+                        table.insert(live, o.Changed:Connect(function() Paint(true) end))
+                        sw.InputBegan:Connect(function(i) if IsPress(i) then pressAt = os.clock() end end)
+                        sw.Activated:Connect(function() o:SetValue(not o.Value) end)
+
+                elseif kind == "Slider" then
+                        local vl = New("TextLabel", { Text = "", TextSize = 12, Size = UDim2.fromOffset(78, 16), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 3),
+                                TextXAlignment = RIGHT, ZIndex = 93, Parent = b })
+                        local tr = New("Frame", { Size = UDim2.new(1, -16, 0, 4), Position = UDim2.new(0, 8, 1, -14), ZIndex = 93, BackgroundColor3 = Lib.Theme.Stroke, Parent = b })
+                        Corner(tr, 2)
+                        local fl = New("Frame", { Size = UDim2.fromScale(0, 1), ZIndex = 94, Theme = { BackgroundColor3 = "Accent" }, Parent = tr })
+                        Corner(fl, 2)
+                        local kn = New("Frame", { Size = UDim2.fromOffset(6, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), ZIndex = 95, BackgroundColor3 = WHITE, Parent = tr })
+                        Corner(kn, 2)
+                        if Lib._SpringOwned then Lib._SpringOwned[fl], Lib._SpringOwned[kn] = true, true end
+                        local function Paint(anim)
+                                local r = Clamp(Map(o.Value, o.Min, o.Max, 0, 1), 0, 1)
+                                vl.Text = SFmt(o, o.Value)
+                                if anim then
+                                        Tween(fl, { Size = UDim2.fromScale(r, 1) }, 0.1)
+                                        Tween(kn, { Position = UDim2.fromScale(r, 0.5) }, 0.1)
+                                else
+                                        fl.Size, kn.Position = UDim2.fromScale(r, 1), UDim2.fromScale(r, 0.5)
+                                end
+                        end
+                        Paint(false)
+                        table.insert(live, o.Changed:Connect(function() Paint(true) end))
+                        local hit = New("TextButton", { Text = "", Size = UDim2.new(1, -8, 0, 24), Position = UDim2.fromOffset(4, 32), ZIndex = 96, Parent = b })
+                        hit.InputBegan:Connect(function(input)
+                                if not IsPress(input) then return end
+                                pressAt = os.clock()
+                                local isTouch = input.UserInputType == Enum.UserInputType.Touch
+                                rlist.ScrollingEnabled = false
+                                local function From(pos)
+                                        o:SetValue(Lerp(o.Min, o.Max, Clamp((pos.X - tr.AbsolutePosition.X) / math.max(tr.AbsoluteSize.X, 1), 0, 1)))
+                                end
+                                From(Pointer(input))
+                                local mc, ec
+                                mc = UIS.InputChanged:Connect(function(i)
+                                        pressAt = os.clock()
+                                        if isTouch then if i == input then From(Pointer(i)) end
+                                        elseif i.UserInputType == Enum.UserInputType.MouseMovement then From(Pointer(i)) end
+                                end)
+                                ec = UIS.InputEnded:Connect(function(i)
+                                        local fin = isTouch and (i == input) or (not isTouch and i.UserInputType == Enum.UserInputType.MouseButton1)
+                                        if fin then rlist.ScrollingEnabled = true mc:Disconnect() ec:Disconnect() end
+                                end)
+                        end)
+
+                elseif kind == "Button" then
+                        local armed = false
+                        local rb = New("TextButton", { Text = "Run", TextSize = 12, Size = UDim2.fromOffset(52, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+                                BackgroundTransparency = 0, ZIndex = 93, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = b })
+                        Corner(rb, 4)
+                        rb.InputBegan:Connect(function(i) if IsPress(i) then pressAt = os.clock() end end)
+                        rb.Activated:Connect(function()
+                                if info.DoubleClick and not armed then
+                                        armed = true
+                                        rb.Text = "Sure?"
+                                        task.delay(2, function() if armed and rb.Parent then armed = false rb.Text = "Run" end end)
+                                        return
+                                end
+                                armed = false
+                                o:Click()
+                                rb.Text = "Done"
+                                task.delay(0.9, function() if rb.Parent then rb.Text = "Run" end end)
+                        end)
+
+                else -- Segmented / single Dropdown: < value >
+                        local holder = New("Frame", { Size = UDim2.fromOffset(118, 24), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0), BackgroundTransparency = 1, ZIndex = 93, Parent = b })
+                        local val = New("TextLabel", { Text = "", TextSize = 12, Size = UDim2.new(1, -44, 1, 0), Position = UDim2.fromOffset(22, 0), ZIndex = 94, TextTruncate = Enum.TextTruncate.AtEnd, Parent = holder })
+                        local function Paint() val.Text = o.Value ~= nil and tostring(o.Value) or "-" end
+                        Paint()
+                        table.insert(live, o.Changed:Connect(Paint))
+                        local function Step(d)
+                                local list = o.Values or {}
+                                if #list == 0 then return end
+                                local i = IndexOf(list, o.Value) or (d > 0 and 0 or 1)
+                                o:SetValue(list[(i - 1 + d) % #list + 1])
+                        end
+                        for _, def in ipairs({ { "<", 0, -1 }, { ">", 1, 1 } }) do
+                                local sb = New("TextButton", { Text = def[1], TextSize = 13, Size = UDim2.fromOffset(20, 22), AnchorPoint = Vector2.new(def[2], 0.5), Position = UDim2.new(def[2], 0, 0.5, 0),
+                                        BackgroundTransparency = 0, ZIndex = 94, Theme = { BackgroundColor3 = "FieldHover", TextColor3 = "SubText" }, Parent = holder })
+                                Corner(sb, 4)
+                                sb.InputBegan:Connect(function(i) if IsPress(i) then pressAt = os.clock() end end)
+                                sb.Activated:Connect(function() Step(def[3]) end)
+                        end
+                end
+                return hgt
+        end
+
+        local function Rebuild()
+                Drop()
+                for _, c in ipairs(rlist:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
+                first = nil
+                local q = box.Text:lower()
+                clear.Visible = q ~= ""
+                if q == "" then Hide() return end
+                local n = 0
+                total = 8
+                for _, tab in ipairs(win.Tabs) do for _, sub in ipairs(tab.Subs) do for _, gb in ipairs(sub.Groupboxes) do
+                        for _, e in ipairs(gb.Entries) do
+                                if n < 12 and not e.static and (e.text:find(q, 1, true) or gb.Name:lower():find(q, 1, true)) then
+                                        n = n + 1
+                                        if not first then first = { gb, e } end
+                                        local hgt = Build(n, tab, sub, gb, e)
+                                        if n <= 7 then total = total + hgt + 2 end
+                                end
+                        end
+                end end end
+                if n == 0 then
+                        New("TextLabel", { Text = "No matches", TextSize = 12, Size = UDim2.new(1, 0, 0, 30), ZIndex = 92, Theme = { TextColor3 = "Dim" }, Parent = rlist })
+                        total = 46
+                end
+                Place()
+                if not results.Visible then
+                        results.Visible = true
+                        Lib:OpenPopup(results, Hide, field, true)
+                end
+        end
+
+        box:GetPropertyChangedSignal("Text"):Connect(Rebuild)
+        box.FocusLost:Connect(function(enter) if enter and first then Pick(first[1], first[2]) end end)
+        -- keyboard opened / closed: re-fit the popup, but never while a finger is on it (rows would move under the tap)
+        local function Refit()
+                task.delay(0.3, function()
+                        if results.Visible and os.clock() - pressAt > 0.8 then Place() end
+                end)
+        end
+        Lib:Connect(UIS:GetPropertyChangedSignal("OnScreenKeyboardVisible"), Refit)
+        Lib:Connect(UIS:GetPropertyChangedSignal("OnScreenKeyboardSize"), Refit)
+end
+end
+
+-- ---------- 5) chat: delete / hide messages ----------
+function Chat:DeleteMessage(msg)
+        Lib:Dialog({ Title = "Delete message", Text = "Delete this message for everyone?",
+                Buttons = { { Text = "Cancel" }, { Text = "Delete", Primary = true, Callback = function()
+                        task.spawn(function()
+                                local d = Decode(self:_Do("/delete", nil, "POST", HttpService:JSONEncode({ id = msg.id })))
+                                if d and d.ok then
+                                        self:_Remove(msg.id)
+                                        self:_PollOnce()
+                                else
+                                        Lib:Notify({ Title = "Chat", Text = (d and d.error) or "The server refused it (does your worker have /delete?). You can still use Hide for me.", Type = "error", Duration = 6 })
+                                end
+                        end)
+                end } } })
+end
+
+function Chat:MessageMenu(msg)
+        local items = {}
+        local name = tostring(msg.display ~= "" and msg.display or msg.name or "?")
+        local mine = tostring(msg.uid) == tostring(LocalPlayer.UserId)
+        table.insert(items, { Text = "View profile", Callback = function() self:ShowProfile(msg) end })
+        if msg.id then table.insert(items, { Text = "Reply", Callback = function() self:SetReply({ id = msg.id, name = name, text = tostring(msg.text ~= "" and msg.text or (msg.cfg and "[config]" or "[image]")):sub(1, 70) }) end }) end
+        if mine and msg.id then
+                table.insert(items, { Text = "Edit message", Callback = function() self:EditMessage(msg) end })
+                table.insert(items, { Text = "Delete message", Danger = true, Callback = function() self:DeleteMessage(msg) end })
+        end
+        table.insert(items, { Text = "Mention", Callback = function() self:Prefill(self.Input.Text .. "@" .. tostring(msg.name) .. " ") end })
+        if type(setclipboard) == "function" and tostring(msg.text or "") ~= "" then table.insert(items, { Text = "Copy text", Callback = function() setclipboard(tostring(msg.text)) end }) end
+        local link = tostring(msg.text or ""):match("https?://[^%s<>\"]+")
+        if link and type(setclipboard) == "function" then
+                link = link:gsub("[%.,;:!%?%)%]]+$", "")
+                table.insert(items, { Text = "Copy link", Callback = function() Copy(link, "Link copied") end })
+        end
+        if msg.id then table.insert(items, { Text = "Hide for me", Callback = function() self:_Remove(msg.id) end }) end
+        if not mine and msg.uid then
+                local blocked = Lib:IsBlocked(msg.uid)
+                table.insert(items, { Text = blocked and "Unblock user" or "Block user", Danger = not blocked, Callback = function()
+                        if blocked then Lib:Unblock(msg.uid) else Lib:Block(msg.uid, name) end
+                end })
+        end
+        self:Menu(items, self.LastPtr)
+end
+
+-- ---------- 6) share a config to any channel / DM / group ----------
+function Chat:ShareConfig(name, data, ch)
+        if self.Blocked or not self.Request then return end
+        if os.clock() - self.LastSend < 0.8 then self:System("Slow down a little.") return end
+        local json = HttpService:JSONEncode(data)
+        if #json > 60000 then Lib:Notify({ Title = "Config", Text = "That config is too big to share.", Type = "error" }) return end
+        local room = (ch and ch.room) or self.Room
+        local here = room == self.Room
+        local where = ch and ((ch.kind == "dm" and "@" or (ch.kind == "grp" and "«" or "#")) .. tostring(ch.name)) or "this chat"
+        self.LastSend = os.clock()
+        local caption = here and Trim(self.Input.Text) or ""
+        local replyId = (here and self.ReplyTo) and self.ReplyTo.id or nil
+        Lib:Notify({ Title = "Config", Text = "Sharing to " .. where .. "...", Type = "info", Duration = 2 })
+        task.spawn(function()
+                local d = Decode(self:_Do("/cfgup", nil, "POST", HttpService:JSONEncode({ name = name, data = json }), room))
+                if not (d and d.ok and d.id) then Lib:Notify({ Title = "Config", Text = (d and d.error) or "Couldn't share the config.", Type = "error" }) return end
+                local r = Decode(self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = caption:sub(1, self.Config.MaxLength), replyTo = replyId, cfg = d.id }), room))
+                if not (r and r.ok) then Lib:Notify({ Title = "Config", Text = (r and r.error) or "Couldn't post the config.", Type = "error" }) return end
+                if here then
+                        self.Input.Text = ""
+                        self:SetReply(nil)
+                        self.Stick = true
+                        self:_PollOnce()
+                end
+                Lib:Notify({ Title = "Config", Text = "Shared «" .. name .. "» to " .. where .. ".", Type = "success", Duration = 3 })
+        end)
+end
+
+function Chat:ChooseShareTarget(cb)
+        local items = {}
+        local function Add(i, ch, mark, label)
+                table.insert(items, { Text = (i == self.ChIndex and "• " or "   ") .. mark .. Short(label, 18), Callback = function() cb(ch) end })
+        end
+        for i, ch in ipairs(self.Channels) do if not ch.kind then Add(i, ch, "#", tostring(ch.name)) end end
+        local hasDM, hasGrp = false, false
+        for _, ch in ipairs(self.Channels) do
+                if ch.kind == "dm" then hasDM = true elseif ch.kind == "grp" then hasGrp = true end
+        end
+        if hasDM then
+                table.insert(items, { Header = true, Text = "DIRECT MESSAGES" })
+                for i, ch in ipairs(self.Channels) do if ch.kind == "dm" then Add(i, ch, "@", tostring(ch.name)) end end
+        end
+        if hasGrp then
+                table.insert(items, { Header = true, Text = "GROUP CHATS" })
+                for i, ch in ipairs(self.Channels) do if ch.kind == "grp" then Add(i, ch, "«", tostring(ch.name)) end end
+        end
+        table.insert(items, { Header = true, Text = "OTHER" })
+        table.insert(items, { Text = "DM someone else...", Callback = function()
+                self:PickUser(function(u)
+                        self:OpenDM(u.uid, u.name, u.display)
+                        local idx = self:_RoomIndex(self:DMRoom(u.uid))
+                        if idx then cb(self.Channels[idx]) end
+                end, "Send config to who?")
+        end })
+        local anchor
+        if self.PanelObj._shown and self.ChBtn and self.ChBtn.Parent then
+                anchor = self.ChBtn
+        else
+                local vp = GetViewport()
+                anchor = Vector2.new(vp.X / 2 - 95, vp.Y / 4)
+        end
+        self:Menu(items, anchor)
+end
+
+function Lib:ShareConfigToChat(saved)
+        local chat = self.ChatObj
+        if not chat or not chat.Alive then self:Notify({ Title = "Config", Text = "Open the chat first.", Type = "warn" }) return end
+        local data, name
+        if saved and saved ~= "" then
+                name = Sanitize(saved)
+                local ok, raw = pcall(function() return readfile(CPath(name)) end)
+                local dec, d = false, nil
+                if ok then dec, d = pcall(HttpService.JSONDecode, HttpService, raw) end
+                if not (dec and type(d) == "table") then self:Notify({ Title = "Config", Text = "Couldn't read that config.", Type = "error" }) return end
+                data = d
+        else
+                data = self:SerializeConfig()
+                local o = self.Options.__ConfigName
+                name = Sanitize(o and o.Value or "")
+                if name == "" then name = "Shared config" end
+        end
+        chat:ChooseShareTarget(function(ch) chat:ShareConfig(name, data, ch) end)
+end
+
+-- ---------- 7) settings: hide ripple switch, add Touch group ----------
+local PrevSettings = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = PrevSettings(self, window)
+        if tab and not tab._p44 then
+                tab._p44 = true
+                pcall(function() local t = Lib.Toggles.FxRipple if t then t:SetVisible(false) end end)
+                pcall(function()
+                        local gb = tab.Subs[1]:AddLeftGroupbox("Touch", { Icon = "pointer" })
+                        gb:AddLabel("If your finger and the color picker, sliders or search results don't line up, calibrate. Tap the circle 3 times.")
+                        gb:AddButton({ Text = "Calibrate touch", Func = function() Lib:CalibrateTouch() end })
+                        gb:AddButton({ Text = "Reset calibration", Func = function() Lib:ResetTouchCal() end })
+                end)
+        end
+        return tab
+end
+
+end
+-- ===================== end patch 4.4 =====================
+
+-- ===================== Patch 4.5 =====================
+do
+local P = {}
+
+-- ---------- 1) branding ----------
+Lib.Version = "4.5.0"
+Lib.ChannelsKey = Lib.ChannelsKey or "AetherChannels"
+
+P.CreateWindow = Lib.CreateWindow
+function Lib:CreateWindow(cfg)
+        cfg = cfg or {}
+        if cfg.Version then self.Version = tostring(cfg.Version) end
+        if cfg.ChatUrl ~= nil then self.DefaultChatUrl = cfg.ChatUrl or nil end
+        if cfg.ChannelsKey then self.ChannelsKey = cfg.ChannelsKey end
+        if cfg.EnvKey and getgenv then
+                pcall(function()
+                        local env = getgenv()
+                        local old = env[cfg.EnvKey]
+                        if type(old) == "table" and old ~= self and old.Unload then pcall(function() old:Unload() end) end
+                        env[cfg.EnvKey] = self
+                        if env.__AetherUI == self then env.__AetherUI = nil end
+                end)
+        end
+        return P.CreateWindow(self, cfg)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        cfg = cfg or {}
+        if cfg.Channels == nil and getgenv then
+                local env = getgenv()
+                local keys = { self.ChannelsKey, (tostring(self.Name):gsub("%W", "")) .. "Channels" }
+                for _, k in ipairs(keys) do
+                        if k and env[k] ~= nil then cfg.Channels = env[k] break end
+                end
+        end
+        return P.CreateChat(self, cfg)
+end
+
+-- ---------- 2) automatic touch offset ----------
+-- Thin invisible bands cover the screen. Whichever band a finger lands on tells us the exact
+-- offset for that finger. The median of the last taps is kept, saved, and reused next session.
+if UIS.TouchEnabled then
+        pcall(function() if Lib.TouchProbeGui then Lib.TouchProbeGui:Destroy() Lib.TouchProbeGui = nil end end)
+        Lib.TouchCal = nil
+        local perInput = setmetatable({}, { __mode = "k" })
+        local hist, bands, lastH, saved, loaded = {}, {}, 0, nil, false
+        local BH = 4
+        local gui = MakeGui(997)
+        P.TouchGui = gui
+        local function Path() return Lib.ConfigFolder .. "/touchauto.json" end
+        local function Learn(off, input)
+                if math.abs(off) > 150 then return end
+                perInput[input] = off
+                table.insert(hist, off)
+                if #hist > 9 then table.remove(hist, 1) end
+                local s = table.clone(hist)
+                table.sort(s)
+                local med = s[math.ceil(#s / 2)]
+                Lib.TouchDY = med
+                if #hist >= 3 and (saved == nil or math.abs(saved - med) > 1) and FsOk() then
+                        saved = med
+                        pcall(function()
+                                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                                writefile(Path(), HttpService:JSONEncode({ y = med }))
+                        end)
+                end
+        end
+        local function Build()
+                local h = gui.AbsoluteSize.Y
+                if h <= 0 or h == lastH then return end
+                lastH = h
+                for _, b in ipairs(bands) do b:Destroy() end
+                bands = {}
+                for i = 0, math.ceil(h / BH) do
+                        local f = Instance.new("Frame")
+                        f.BackgroundTransparency, f.BorderSizePixel, f.Active = 1, 0, false
+                        f.Size, f.Position = UDim2.new(1, 0, 0, BH), UDim2.fromOffset(0, i * BH)
+                        f.Parent = gui
+                        f.InputBegan:Connect(function(input)
+                                if input.UserInputType ~= Enum.UserInputType.Touch then return end
+                                Learn((f.AbsolutePosition.Y + BH / 2) - input.Position.Y, input)
+                        end)
+                        bands[#bands + 1] = f
+                end
+        end
+        Build()
+        Lib:Connect(gui:GetPropertyChangedSignal("AbsoluteSize"), function() task.defer(Build) end)
+
+        Pointer = function(input)
+                if input and input.UserInputType == Enum.UserInputType.Touch then
+                        if not loaded then
+                                loaded = true
+                                if not Lib.TouchDY and FsOk() then
+                                        pcall(function()
+                                                if isfile(Path()) then
+                                                        local d = HttpService:JSONDecode(readfile(Path()))
+                                                        if type(d) == "table" and tonumber(d.y) then Lib.TouchDY, saved = tonumber(d.y), tonumber(d.y) end
+                                                end
+                                        end)
+                                end
+                        end
+                        local off = perInput[input] or Lib.TouchDY or GuiService:GetGuiInset().Y
+                        return Vector2.new(input.Position.X, input.Position.Y + off)
+                end
+                return UIS:GetMouseLocation() + Lib.PtrShift
+        end
+        Lib.Pointer = Pointer
+end
+
+function Lib:CalibrateTouch() self:Notify({ Title = "Touch", Text = "Touch is calibrated automatically.", Type = "info" }) end
+function Lib:ResetTouchCal() self.TouchCal, self.TouchDY = nil, nil end
+
+P.Unload = Lib.Unload
+function Lib:Unload()
+        pcall(function() if P.TouchGui then P.TouchGui:Destroy() end end)
+        return P.Unload(self)
+end
+
+-- ---------- 3) color picker: HSV / RGB sliders, copy hex, presets ----------
+local Presets = { "FFFFFF", "C8C8C8", "808080", "000000", "EF4444", "F59E0B", "10B981", "3B82F6", "8B5CF6", "EC4899" }
+
+function Lib:_ExtendPicker(picker, popup, swStroke)
+        local baseH = 8 + 110 + 8 + 12 + 8 + (picker.Transparency ~= nil and 20 or 0) + 24 + 10
+        local y0 = baseH - 4
+        local totalH = baseH + 116
+        local mode, open, lastKey = "HSV", false, nil
+        local function Btn(text, x, w, right)
+                local b = New("TextButton", { Text = text, TextSize = 11, Size = UDim2.fromOffset(w, 20), AnchorPoint = Vector2.new(right and 1 or 0, 0),
+                        Position = right and UDim2.new(1, -x, 0, y0) or UDim2.fromOffset(x, y0), BackgroundTransparency = 0,
+                        Theme = { BackgroundColor3 = "Field", TextColor3 = "SubText" }, Parent = popup })
+                Corner(b, 4)
+                return b
+        end
+        local hsvB, rgbB, copyB = Btn("HSV", 8, 44), Btn("RGB", 56, 44), Btn("Copy hex", 8, 62, true)
+        local rows = {}
+        local function Refresh(force)
+                local h, s, v = picker.Hue, picker.Sat, picker.Vib
+                local key = mode .. math.floor(h * 1000) .. ":" .. math.floor(s * 1000) .. ":" .. math.floor(v * 1000)
+                if not force and key == lastKey then return end
+                lastKey = key
+                local c = picker.Value
+                local names, vals, grads, txt
+                if mode == "HSV" then
+                        names, vals = { "H", "S", "V" }, { h, s, v }
+                        grads = { Rainbow, ColorSequence.new(Color3.fromHSV(h, 0, v), Color3.fromHSV(h, 1, v)), ColorSequence.new(Color3.fromHSV(h, s, 0), Color3.fromHSV(h, s, 1)) }
+                        txt = { math.floor(h * 360 + 0.5) .. "°", math.floor(s * 100 + 0.5) .. "%", math.floor(v * 100 + 0.5) .. "%" }
+                else
+                        names, vals = { "R", "G", "B" }, { c.R, c.G, c.B }
+                        grads = { ColorSequence.new(Color3.new(0, c.G, c.B), Color3.new(1, c.G, c.B)), ColorSequence.new(Color3.new(c.R, 0, c.B), Color3.new(c.R, 1, c.B)),
+                                ColorSequence.new(Color3.new(c.R, c.G, 0), Color3.new(c.R, c.G, 1)) }
+                        txt = { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+                end
+                for i, r in ipairs(rows) do
+                        r.lab.Text, r.grad.Color, r.knob.Position, r.val.Text = names[i], grads[i], UDim2.fromScale(Clamp(vals[i], 0, 1), 0.5), tostring(txt[i])
+                end
+                hsvB.BackgroundColor3 = mode == "HSV" and Lib.Theme.Accent or Lib.Theme.Field
+                hsvB.TextColor3 = mode == "HSV" and Lib.KnobOn() or Lib.Theme.SubText
+                rgbB.BackgroundColor3 = mode == "RGB" and Lib.Theme.Accent or Lib.Theme.Field
+                rgbB.TextColor3 = mode == "RGB" and Lib.KnobOn() or Lib.Theme.SubText
+        end
+        local function Apply(i, x)
+                if mode == "HSV" then
+                        if i == 1 then
+                                picker.Hue = x
+                                if picker.RainbowOn then picker:SetRainbow(false) end
+                        elseif i == 2 then picker.Sat = x else picker.Vib = x end
+                else
+                        local c = picker.Value
+                        local r, g, b = c.R, c.G, c.B
+                        if i == 1 then r = x elseif i == 2 then g = x else b = x end
+                        local h, s, v = Color3.new(r, g, b):ToHSV()
+                        if s > 0.001 and v > 0.001 then picker.Hue = h end
+                        picker.Sat, picker.Vib = s, v
+                        if picker.RainbowOn then picker:SetRainbow(false) end
+                end
+                picker:_Display()
+                picker:_Fire(picker.Transparency)
+                Refresh(true)
+        end
+        for i = 1, 3 do
+                local y = y0 + 26 + (i - 1) * 20
+                local lab = New("TextLabel", { Text = "", TextSize = 11, Size = UDim2.fromOffset(14, 18), Position = UDim2.fromOffset(8, y), Theme = { TextColor3 = "SubText" }, Parent = popup })
+                local track = New("Frame", { Size = UDim2.new(1, -(26 + 54), 0, 10), Position = UDim2.fromOffset(26, y + 4), BackgroundColor3 = WHITE, Parent = popup })
+                Corner(track, 3)
+                local grad = New("UIGradient", { Parent = track })
+                local knob = New("Frame", { Size = UDim2.fromOffset(4, 16), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = WHITE, ZIndex = 3, Parent = track })
+                Corner(knob, 2) Stroke(knob, "Bg", 1)
+                local val = New("TextLabel", { Text = "", TextSize = 11, Size = UDim2.fromOffset(44, 18), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, y), TextXAlignment = RIGHT, Parent = popup })
+                local hit = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, 18), Position = UDim2.fromOffset(0, -4), ZIndex = 5, Parent = track })
+                DragArea(hit, function(x) Apply(i, x) end)
+                rows[i] = { lab = lab, grad = grad, knob = knob, val = val }
+        end
+        local strip = New("Frame", { Size = UDim2.new(1, -16, 0, 18), Position = UDim2.fromOffset(8, y0 + 26 + 60 + 6), BackgroundTransparency = 1, Parent = popup })
+        List(strip, 4, Enum.FillDirection.Horizontal)
+        for i, hex in ipairs(Presets) do
+                local col = FromHex(hex)
+                local b = New("TextButton", { Text = "", Size = UDim2.new(0.1, -3.6, 1, 0), LayoutOrder = i, BackgroundTransparency = 0, BackgroundColor3 = col, Parent = strip })
+                Corner(b, 4) Stroke(b, "Stroke", 1, 0.3)
+                b.Activated:Connect(function()
+                        if picker.RainbowOn then picker:SetRainbow(false) end
+                        picker:SetValue(col)
+                        Refresh(true)
+                end)
+        end
+        hsvB.Activated:Connect(function() mode = "HSV" Refresh(true) end)
+        rgbB.Activated:Connect(function() mode = "RGB" Refresh(true) end)
+        copyB.Activated:Connect(function() Copy("#" .. ToHex(picker.Value), "Hex copied") end)
+        Refresh(true)
+        Lib:Connect(RunService.RenderStepped, function()
+                if open and popup.Parent and popup.Visible then Refresh(false) end
+        end)
+        -- the swatch always calls picker:Open(), so Open toggles
+        function picker:Open()
+                if open then return self:Close() end
+                open = true
+                popup.Visible = true
+                Refresh(true)
+                Tween(popup, { Size = UDim2.new(1, 0, 0, totalH) }, 0.18, Enum.EasingStyle.Quint)
+                if swStroke then swStroke.Color = Lib.Theme.Accent end
+        end
+        function picker:Close()
+                if not open then return end
+                open = false
+                local t = Tween(popup, { Size = UDim2.new(1, 0, 0, 0) }, 0.14, Enum.EasingStyle.Quint)
+                t.Completed:Connect(function() if not open then popup.Visible = false end end)
+                if swStroke then swStroke.Color = Lib.Theme.Stroke end
+        end
+end
+
+P.CreateColorPicker = Lib._CreateColorPicker
+function Lib:_CreateColorPicker(owner, idx, info)
+        local parentF = owner.Row.Parent
+        local before, hBefore = {}, {}
+        for _, c in ipairs(parentF:GetChildren()) do before[c] = true end
+        if owner.AddonFrame then for _, c in ipairs(owner.AddonFrame:GetChildren()) do hBefore[c] = true end end
+        local picker = P.CreateColorPicker(self, owner, idx, info)
+        local popup, swStroke
+        for _, c in ipairs(parentF:GetChildren()) do
+                if not before[c] and c.Name == "Inline" then popup = c end
+        end
+        if owner.AddonFrame then
+                for _, c in ipairs(owner.AddonFrame:GetChildren()) do
+                        if not hBefore[c] and c:IsA("TextButton") then swStroke = c:FindFirstChildOfClass("UIStroke") end
+                end
+        end
+        if popup then
+                local ok, err = pcall(Lib._ExtendPicker, Lib, picker, popup, swStroke)
+                if not ok then warn("[Aether] color picker: " .. tostring(err)) end
+        end
+        return picker
+end
+
+-- ---------- 4) search palette: nothing underneath can react ----------
+P.BuildSearch = Window._BuildSearch
+function Window:_BuildSearch(field, clear)
+        local before = {}
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+        P.BuildSearch(self, field, clear)
+        local results
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+                if not before[c] and c:IsA("Frame") then results = c end
+        end
+        if not results then return end
+        local box = self.SearchBox
+        local blocker = New("TextButton", { Name = "SearchBlocker", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 89,
+                Active = true, Visible = false, Parent = Lib.Overlay })
+        blocker.InputBegan:Connect(function(i)
+                if IsPress(i) and IsOver(field, Pointer(i)) then
+                        task.defer(function() pcall(function() box:CaptureFocus() end) end)
+                end
+        end)
+        results:GetPropertyChangedSignal("Visible"):Connect(function() blocker.Visible = results.Visible end)
+end
+
+-- ---------- 5) fonts ----------
+Lib.FontValues, Lib.FontSet = { "Default" }, {}
+do
+        local names = {}
+        for _, f in ipairs(Enum.Font:GetEnumItems()) do
+                if f.Name ~= "Unknown" then table.insert(names, f.Name) Lib.FontSet[f.Name] = true end
+        end
+        table.sort(names)
+        for _, n in ipairs(names) do table.insert(Lib.FontValues, n) end
+end
+
+function Lib:EncodeStyle(force)
+        local s = self.NameStyle
+        if not (s.On or force) then return nil end
+        local out = "c=" .. ToHex(s.C1)
+        if s.Grad then out = out .. ";g=" .. ToHex(s.C2) end
+        if s.Font ~= "Default" and Lib.FontSet[s.Font] then out = out .. ";f=" .. s.Font end
+        return out
+end
+
+function Lib:ParseStyle(s)
+        if type(s) ~= "string" or #s > 60 then return nil end
+        local st = {}
+        local c, g, f = s:match("c=(%x%x%x%x%x%x)"), s:match("g=(%x%x%x%x%x%x)"), s:match("f=(%w+)")
+        if c then st.c1 = FromHex(c) end
+        if g then st.c2 = FromHex(g) end
+        if f and Lib.FontSet[f] then st.font = f end
+        if not (st.c1 or st.font) then return nil end
+        return st
+end
+
+function Lib:LoadNameStyle()
+        if self._nsLoaded then return end
+        self._nsLoaded = true
+        if not FsOk() then return end
+        pcall(function()
+                local p = self.ConfigFolder .. "/namestyle.json"
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                local s = self.NameStyle
+                s.On = d.on == true
+                s.C1 = FromHex(d.c1 or "") or s.C1
+                s.C2 = FromHex(d.c2 or "") or s.C2
+                s.Grad = d.grad == true
+                if d.font == "Default" or Lib.FontSet[d.font] then s.Font = d.font end
+        end)
+end
+
+P.BaseFont, P.BaseBold = Lib.Font, Lib.FontBold
+function Lib:SetUIFont(name)
+        local f, fb
+        if name == nil or name == "Default" then
+                f, fb = P.BaseFont, P.BaseBold
+        else
+                local ok, v = pcall(function() return Enum.Font[name] end)
+                if not (ok and v) then return false end
+                local okb, vb = pcall(function() return Enum.Font[name .. "Bold"] end)
+                f, fb = v, (okb and vb) or v
+        end
+        local old, oldB = self.Font, self.FontBold
+        self.Font, self.FontBold = f, fb
+        for _, root in ipairs({ self.Gui, self.Overlay }) do
+                for _, d in ipairs(root:GetDescendants()) do
+                        if TextClasses[d.ClassName] then
+                                if d.Font == old then d.Font = f elseif d.Font == oldB then d.Font = fb end
+                        end
+                end
+        end
+        return true
+end
+
+function Lib:SaveUIFont(name)
+        if not FsOk() then return end
+        pcall(function()
+                if not isfolder(self.ConfigFolder) then makefolder(self.ConfigFolder) end
+                writefile(self.ConfigFolder .. "/uifont.txt", tostring(name or "Default"))
+        end)
+end
+
+function Lib:LoadUIFont()
+        if not FsOk() then return "Default" end
+        local ok, c = pcall(function() local p = self.ConfigFolder .. "/uifont.txt" if isfile(p) then return readfile(p) end end)
+        c = ok and c and Trim(c) or "Default"
+        if c ~= "Default" and not Lib.FontSet[c] then c = "Default" end
+        return c
+end
+
+-- ---------- 6) settings UI ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = P.BuildSettingsTab(self, window)
+        if tab and not tab._p45 then
+                tab._p45 = true
+                pcall(function()
+                        for _, gb in ipairs(tab.Subs[1].Groupboxes) do
+                                if gb.Name == "Touch" then gb:SetVisible(false) gb.Entries = {} end
+                        end
+                end)
+                pcall(function() local o = Lib.Options.__NameFont if o then o:SetValues(Lib.FontValues) end end)
+                pcall(function()
+                        local saved = Lib:LoadUIFont()
+                        local gb = tab.Subs[1]:AddRightGroupbox("Typography", { Icon = "type", Collapsible = true })
+                        gb:AddDropdown("__UIFont", { Text = "UI font", Values = Lib.FontValues, Default = saved, IgnoreConfig = true,
+                                Callback = function(v) Lib:SetUIFont(v or "Default") Lib:SaveUIFont(v) end })
+                        if saved ~= "Default" then task.defer(function() Lib:SetUIFont(saved) end) end
+                end)
+        end
+        return tab
+end
+
+end
+-- ===================== end patch 4.5 =====================
+
+-- ===================== Patch 4.6 =====================
+do
+local P = {}
+
+-- 1) springs, ripple and tab transitions off
+Lib.Fx = Lib.Fx or {}
+Lib.Fx.Springs, Lib.Fx.Ripple, Lib.Fx.TabAnim = false, false, false
+
+-- 2) tab / sub-tab content appears instantly (no slide-in)
+local PrevTween = Tween
+Tween = function(inst, props, ...)
+        if typeof(inst) == "Instance" and type(props) == "table" and props.Position ~= nil then
+                local n = inst.Name
+                if n:sub(1, 5) == "Page_" or n:sub(1, 4) == "Sub_" then
+                        inst.Position = props.Position
+                        return { Completed = Signal.new(), Cancel = function() end, Play = function() end, Pause = function() end }
+                end
+        end
+        return PrevTween(inst, props, ...)
+end
+Lib.Tween = Tween
+
+-- 3) settings: no target picker for end users, no Motion group
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = P.BuildSettingsTab(self, window)
+        if tab and not tab._p46 then
+                tab._p46 = true
+                pcall(function()
+                        local target = Lib.Options.__PreviewTarget
+                        for _, sub in ipairs(tab.Subs) do
+                                for _, gb in ipairs(sub.Groupboxes) do
+                                        if gb.Name == "Motion" then
+                                                gb:SetVisible(false)
+                                                gb.Entries = {}
+                                        elseif gb.Name == "Preview" then
+                                                if target and target.Row then target.Row.Visible = false end
+                                                for _, row in ipairs(gb.Container:GetChildren()) do
+                                                        if row:IsA("Frame") then
+                                                                for _, b in ipairs(row:GetChildren()) do
+                                                                        if b:IsA("TextButton") and (b.Text == "Set target" or b.Text == "Back to me") then
+                                                                                row.Visible = false
+                                                                                break
+                                                                        end
+                                                                end
+                                                        end
+                                                end
+                                                for i = #gb.Entries, 1, -1 do
+                                                        if gb.Entries[i].obj == target then table.remove(gb.Entries, i) end
+                                                end
+                                        end
+                                end
+                        end
+                        for _, k in ipairs({ "FxSprings", "FxRipple", "FxTabAnim" }) do
+                                Lib.Options[k], Lib.Toggles[k] = nil, nil
+                        end
+                end)
+        end
+        return tab
+end
+
+-- 4) sidebar tab list: hide the scrollbar
+P.CreateWindow = Lib.CreateWindow
+function Lib:CreateWindow(cfg)
+        local win = P.CreateWindow(self, cfg)
+        pcall(function()
+                local tl = win.TabList
+                if tl and tl:IsA("ScrollingFrame") then
+                        tl.ScrollBarThickness = 0
+                        tl.ScrollBarImageTransparency = 1
+                        local pad = tl:FindFirstChildOfClass("UIPadding")
+                        if pad then pad.PaddingRight = UDim.new(0, 0) end
+                end
+        end)
+        return win
+end
+
+end
+-- ===================== end patch 4.6 =====================
 
 return Lib
