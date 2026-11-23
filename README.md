@@ -1,3 +1,6 @@
+## THIS WAS MADE COMPLETELY USING CLAUDE 
+
+
 # Aether UI
 
 A full-featured Roblox UI library for script hubs. It runs on PC and mobile and ships with everything built in: tabs, a settings page, configs, a 3D ESP preview, a keybind list, a watermark and a live chat.
