@@ -208,6 +208,10 @@ Configs are saved to `<workspace>/<Folder>/configs/*.json`. Use the **Settings >
 
 A complete demo with every element, a combat and visuals setup and a components showcase is in [`example.lua`](example.lua).
 
+## Open Source Code
+
+[`library.lua`](library.lua)
+
 ## License
 
 Add your license here.
