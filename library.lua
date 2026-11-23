@@ -11427,4 +11427,393 @@ end
 end
 -- ===================== end patch 4.8 =====================
 
+-- ===================== Aether patch 4.9.1 =====================
+do
+local P = {}
+Lib.Version = "4.9.1"
+
+Lib.ChatName = ""
+
+do
+        local loaded, applyTick = false, 0
+        local function Path() return Lib.ConfigFolder .. "/chatname.txt" end
+
+        local function Clean(t)
+                t = tostring(t or "")
+                t = (t:gsub("%c", " "))
+                t = (t:gsub("%s+", " "))
+                t = Trim(t)
+                local n = utf8.len(t)
+                if n and n > 24 then t = t:sub(1, utf8.offset(t, 25) - 1) elseif not n then t = t:sub(1, 24) end
+                return t
+        end
+
+        function Lib:LoadChatName()
+                if loaded then return self.ChatName end
+                loaded = true
+                if FsOk() then
+                        pcall(function()
+                                local p = Path()
+                                if isfile(p) then self.ChatName = Clean(readfile(p)) end
+                        end)
+                end
+                return self.ChatName
+        end
+
+        function Lib:SetChatName(t)
+                t = Clean(t)
+                self:LoadChatName()
+                applyTick = applyTick + 1
+                local my = applyTick
+                task.delay(1, function()
+                        if my ~= applyTick or Lib.Unloaded then return end
+                        Lib.ChatName = t
+                        if FsOk() then
+                                pcall(function()
+                                        if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                                        writefile(Path(), t)
+                                end)
+                        end
+                end)
+        end
+end
+
+function Chat:_InitChatName()
+        if self._nameWrap or type(self.Request) ~= "function" then return end
+        self._nameWrap = true
+        local raw = self.Request
+        self.Request = function(req, ...)
+                local n = Lib:LoadChatName()
+                if n ~= "" and type(req) == "table" and type(req.Url) == "string" then
+                        local enc = UrlEncode(n)
+                        req.Url = (req.Url:gsub("([%?&])display=[^&]*", function(p) return p .. "display=" .. enc end))
+                end
+                return raw(req, ...)
+        end
+end
+
+function Chat:Menu(items, anchor)
+        local usable = {}
+        for _, it in ipairs(items) do if it.Text and it.Text ~= "" then table.insert(usable, it) end end
+        if #usable == 0 then return end
+        local w, rh = 190, H(26)
+        local h = 6
+        for _, it in ipairs(usable) do h = h + (it.Header and H(18) or rh) end
+        local sc = Lib.Scale
+        local maxH = math.max(120, (Lib.Overlay.AbsoluteSize.Y - 16) / sc)
+        local shownH = math.min(h, maxH)
+        local menu = Sink(New("Frame", { Size = UDim2.fromOffset(w, shownH), BackgroundTransparency = 0, ZIndex = 85, Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+        Corner(menu, 6) Stroke(menu, "Stroke", 1, 0)
+        New("UIScale", { Scale = sc, Parent = menu })
+        local scroll = New("ScrollingFrame", { Size = UDim2.new(1, -6, 1, -6), Position = UDim2.fromOffset(3, 3), AutomaticCanvasSize = Y, ScrollBarThickness = 2, ZIndex = 86, Parent = menu })
+        List(scroll, 0)
+        for i, it in ipairs(usable) do
+                if it.Header then
+                        New("TextLabel", { Text = it.Text, Font = Lib.FontBold, TextSize = 9, Size = UDim2.new(1, 0, 0, H(18)), LayoutOrder = i, TextXAlignment = LEFT, ZIndex = 87,
+                                Theme = { TextColor3 = "Dim" }, Parent = scroll })
+                else
+                        local b = New("TextButton", { Text = it.Text, TextSize = 12, Size = UDim2.new(1, 0, 0, rh), LayoutOrder = i, TextXAlignment = LEFT, ZIndex = 87,
+                                BackgroundTransparency = 1, BackgroundColor3 = Lib.Theme.FieldHover, TextColor3 = it.Danger and Lib.Theme.Bad or Lib.Theme.Text, TextTruncate = Enum.TextTruncate.AtEnd, Parent = scroll })
+                        Corner(b, 4) Pad(b, 9, 0, 8, 0)
+                        b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.3 }, 0.06) end)
+                        b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+                        Press(b, function() Lib:ClosePopup() Safe(it.Callback) end)
+                end
+        end
+        local pos
+        if typeof(anchor) == "Instance" then
+                local hh
+                pos, hh = PlaceBelow(anchor, w * sc, shownH * sc, 4, false)
+                menu.Size = UDim2.fromOffset(w, math.min(shownH, math.max(hh / sc, 60)))
+        else
+                pos = PlaceAt(anchor, w * sc, shownH * sc)
+        end
+        menu.Position = UDim2.fromOffset(pos.X, pos.Y)
+        Lib:OpenPopup(menu, function() menu:Destroy() end, typeof(anchor) == "Instance" and anchor or nil)
+end
+
+function Chat:LeaveGroup(ch)
+        ch = ch or self.Channels[self.ChIndex]
+        if not ch or ch.kind ~= "grp" then return end
+        local owner = tonumber(ch.creator or ch.owner) == LocalPlayer.UserId
+        local alone = #(ch.members or {}) <= 1
+        local text = "Leave «" .. tostring(ch.name) .. "»? Someone has to invite you back in."
+        if owner and alone then
+                text = "You're the only one in «" .. tostring(ch.name) .. "». Leaving closes the group."
+        elseif owner then
+                text = "You're the owner of «" .. tostring(ch.name) .. "». If you leave, the member who's been here longest becomes the owner. You can pick someone yourself first with \"Make owner...\"."
+        end
+        Lib:Dialog({ Title = "Leave group", Text = text,
+                Buttons = { { Text = "Cancel" }, { Text = "Leave", Primary = true, Callback = function()
+                        task.spawn(function()
+                                local d = Decode(self:_Do("/group/leave", nil, "POST", HttpService:JSONEncode({ id = ch.gid })))
+                                if d and d.ok then
+                                        self:_RemoveChannel(ch)
+                                        Lib:Notify({ Title = "Group chat", Text = (d.closed and "Closed «" or "You left «") .. tostring(ch.name) .. "».", Type = "success", Duration = 3 })
+                                else
+                                        Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't leave the group.", Type = "error" })
+                                end
+                        end)
+                end } } })
+end
+
+function Chat:TransferOwner(ch)
+        ch = ch or self.Channels[self.ChIndex]
+        if not ch or ch.kind ~= "grp" then return end
+        if tonumber(ch.creator or ch.owner) ~= LocalPlayer.UserId then
+                Lib:Notify({ Title = "Group chat", Text = "Only the owner can do that.", Type = "warn" })
+                return
+        end
+        local items = { { Header = true, Text = "MAKE OWNER" } }
+        for _, m in ipairs(ch.members or {}) do
+                local uid = tonumber(type(m) == "table" and m.uid or m)
+                if uid and uid ~= LocalPlayer.UserId then
+                        local nm = type(m) == "table" and tostring((m.display ~= nil and m.display ~= "") and m.display or m.name or uid) or ("user " .. uid)
+                        table.insert(items, { Text = Short(nm, 22), Callback = function()
+                                Lib:Dialog({ Title = "Make owner", Text = "Make " .. nm .. " the owner of «" .. tostring(ch.name) .. "»? Only owners can rename the group and hand it over.",
+                                        Buttons = { { Text = "Cancel" }, { Text = "Make owner", Primary = true, Callback = function()
+                                                task.spawn(function()
+                                                        local d = Decode(self:_Do("/group/owner", nil, "POST", HttpService:JSONEncode({ id = ch.gid, uid = uid })))
+                                                        if d and d.ok then
+                                                                ch.creator, ch.owner = uid, uid
+                                                                Lib:Notify({ Title = "Group chat", Text = nm .. " is now the owner.", Type = "success", Duration = 3 })
+                                                                self:_RefreshChannel()
+                                                                self:_PollOnce()
+                                                        else
+                                                                Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't hand it over. Is your worker updated?", Type = "error" })
+                                                        end
+                                                end)
+                                        end } } })
+                        end })
+                end
+        end
+        if #items == 1 then
+                Lib:Notify({ Title = "Group chat", Text = "Nobody else is in this group yet.", Type = "warn" })
+                return
+        end
+        self:Menu(items, self.ChBtn)
+end
+
+function Chat:_InitLeave()
+        if self.LeaveBtn or not self.ChBtn then return end
+        local api = IconButton(self.ChBtn, "log-out", ">", 20, "Leave group", "Bad", 1)
+        api.Button.AnchorPoint, api.Button.Position, api.Button.Visible = Vector2.new(1, 0.5), UDim2.new(1, -28, 0.5, 0), false
+        api.Button.ZIndex = 5
+        api.Button.Activated:Connect(function() self:LeaveGroup() end)
+        self.LeaveBtn = api
+        self:_RefreshChannel()
+end
+
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+        P.RefreshChannel(self)
+        pcall(function()
+                if not self.LeaveBtn then return end
+                local ch = self.Channels[self.ChIndex]
+                local g = ch ~= nil and ch.kind == "grp"
+                self.LeaveBtn.Button.Visible = g
+                self.ChLabel.Size = UDim2.new(1, g and -56 or -30, 1, 0)
+        end)
+end
+
+local function CanPin(chat)
+        local r = chat.Room
+        return type(r) == "string" and (r:sub(1, 3) == "dm:" or r:sub(1, 4) == "grp:")
+end
+
+local function PinWho(p)
+        if p.type == "announce" then return "Announcement" end
+        local n = (p.display ~= nil and p.display ~= "") and p.display or p.name
+        return tostring(n or "?")
+end
+
+local function PinText(p)
+        local t = tostring(p.text or "")
+        if t == "" then return "[attachment]" end
+        return t
+end
+
+function Chat:PinMessage(msg, on)
+        if not (msg and msg.id and self.Request) then return end
+        local room = self.Room
+        task.spawn(function()
+                local d = Decode(self:_Do(on and "/pin" or "/unpin", nil, "POST", HttpService:JSONEncode({ id = msg.id }), room))
+                if d and d.ok then
+                        if room == self.Room then
+                                if type(d.pinned) == "table" then self:SetPinned(d.pinned) end
+                                self:_PollOnce()
+                        end
+                        Lib:Notify({ Title = "Pins", Text = on and "Message pinned." or "Message unpinned.", Type = "success", Duration = 2.5 })
+                else
+                        Lib:Notify({ Title = "Pins", Text = (d and d.error) or ("Couldn't " .. (on and "pin" or "unpin") .. " that. Your worker needs /pin and /unpin for groups and DMs."),
+                                Type = "error", Duration = 6 })
+                end
+        end)
+end
+
+function Chat:_GotoPinned(p)
+        if p.id and self.ByLid[p.id] then
+                self.Stick = false
+                self:_JumpTo(p.id)
+        else
+                Lib:Dialog({ Title = "Pinned by " .. tostring(p.by or "someone"), Text = PinWho(p) .. ": " .. PinText(p) })
+        end
+end
+
+function Chat:ShowPins()
+        local list = self.Pinned or {}
+        local canUn = CanPin(self)
+        local Z, W, HH = 140, 340, 400
+        local dim = New("TextButton", { Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.45, BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+        local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 1,
+                Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+        Corner(card, 10) Stroke(card)
+        New("UIScale", { Scale = math.min(1, Lib.Overlay.AbsoluteSize.X / (W + 20), Lib.Overlay.AbsoluteSize.Y / (HH + 20)), Parent = card })
+        New("TextLabel", { Text = "Pinned messages · " .. #list, Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -80, 0, 30), Position = UDim2.fromOffset(12, 0),
+                TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+        local close = New("TextButton", { Text = "Close", TextSize = 12, Size = UDim2.fromOffset(52, 22), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 4),
+                BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+        Corner(close, 5)
+        local function Close() if dim.Parent then dim:Destroy() end end
+        close.Activated:Connect(Close)
+        dim.Activated:Connect(Close)
+        local scroll = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -42), Position = UDim2.fromOffset(8, 34), AutomaticCanvasSize = Y, ScrollBarThickness = 2, ZIndex = Z + 2, Parent = card })
+        List(scroll, 4)
+        if #list == 0 then
+                New("TextLabel", { Text = canUn and "Nothing pinned yet. Right-click (or long-press) a message and choose Pin Message." or "Nothing pinned here yet.",
+                        TextSize = 12, TextWrapped = true, Size = UDim2.new(1, 0, 0, 44), ZIndex = Z + 3, Theme = { TextColor3 = "Dim" }, Parent = scroll })
+        end
+        for i, p in ipairs(list) do
+                local row = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, H(50)), LayoutOrder = i, BackgroundTransparency = 0, ZIndex = Z + 3,
+                        Theme = { BackgroundColor3 = "Field" }, Parent = scroll })
+                Corner(row, 6)
+                local reserve = canUn and 76 or 16
+                New("TextLabel", { Text = PinWho(p), Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, -reserve, 0, 16), Position = UDim2.fromOffset(10, 6),
+                        TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 4, Parent = row })
+                New("TextLabel", { Text = PinText(p), TextSize = 12, Size = UDim2.new(1, -reserve, 0, 16), Position = UDim2.fromOffset(10, 24),
+                        TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 4, Theme = { TextColor3 = "SubText" }, Parent = row })
+                if canUn then
+                        local ub = New("TextButton", { Text = "Unpin", TextSize = 11, Size = UDim2.fromOffset(54, 24), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+                                BackgroundTransparency = 0, ZIndex = Z + 5, Theme = { BackgroundColor3 = "FieldHover", TextColor3 = "Bad" }, Parent = row })
+                        Corner(ub, 4)
+                        ub.Activated:Connect(function() Close() self:PinMessage(p, false) end)
+                end
+                row.MouseEnter:Connect(function() Tween(row, { BackgroundColor3 = Lib.Theme.FieldHover }, 0.06) end)
+                row.MouseLeave:Connect(function() Tween(row, { BackgroundColor3 = Lib.Theme.Field }, 0.08) end)
+                row.Activated:Connect(function() Close() self:_GotoPinned(p) end)
+        end
+end
+
+function Chat:_InitPins()
+        if self._pinUI or not self.PinBar then return end
+        self._pinUI = true
+        self.PinText.Size = UDim2.new(1, -136, 1, 0)
+        self.PinCount.Visible = false
+        self.PinListBtn = New("TextButton", { Name = "PinList", Text = "", TextSize = 11, Size = UDim2.fromOffset(74, 28), AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, -28, 0, 0), Theme = { TextColor3 = "Accent" }, Parent = self.PinBar })
+        self.PinListBtn.Activated:Connect(function() self:ShowPins() end)
+        self.PinX.Button.Activated:Connect(function()
+                local p = self.Pinned[self.PinIdx]
+                if p and CanPin(self) then self:PinMessage(p, false) end
+        end)
+        self:_RefreshPin()
+end
+
+P.RefreshPin = Chat._RefreshPin
+function Chat:_RefreshPin()
+        P.RefreshPin(self)
+        pcall(function()
+                if not self._pinUI then return end
+                self.PinCount.Visible = false
+                local n = #self.Pinned
+                self.PinListBtn.Text = n .. (n == 1 and " pin" or " pins") .. " ▾"
+                self.PinX.Button.Visible = n > 0 and CanPin(self)
+        end)
+end
+
+P.MenuItems = Chat._MenuItems
+function Chat:_MenuItems(msg)
+        local groups = P.MenuItems(self, msg)
+        if msg and msg.id and CanPin(self) and type(groups[1]) == "table" then
+                local pinned = self:_IsPinned(msg.id)
+                table.insert(groups[1], { Text = pinned and "Unpin Message" or "Pin Message", Icon = "pin", Cb = function() self:PinMessage(msg, not pinned) end })
+        end
+        return groups
+end
+
+P.Menu = Chat.Menu
+function Chat:Menu(items, anchor)
+        local picker = items[1] and items[1].Header and items[1].Text == "MAKE OWNER"
+        if anchor ~= nil and anchor == self.ChBtn and not picker then
+                local cur = self.Channels[self.ChIndex]
+                local mine, keep = {}, {}
+                for _, it in ipairs(items) do
+                        local t = it.Text
+                        if t == "Rename group..." or t == "Invite member..." or t == "Leave group" or t == "Close this DM" then
+                                if t == "Leave group" and cur and cur.kind == "grp" then it.Callback = function() self:LeaveGroup(cur) end end
+                                table.insert(mine, it)
+                        else
+                                table.insert(keep, it)
+                        end
+                end
+                if cur and cur.kind == "grp" and tonumber(cur.creator or cur.owner) == LocalPlayer.UserId then
+                        local at = 1
+                        for i, it in ipairs(mine) do if it.Text == "Invite member..." then at = i + 1 end end
+                        table.insert(mine, at, { Text = "Make owner...", Callback = function() self:TransferOwner(cur) end })
+                end
+                local out = {}
+                if #mine > 0 then
+                        table.insert(out, { Header = true, Text = (cur and cur.kind == "grp") and "THIS GROUP" or "THIS DM" })
+                        for _, it in ipairs(mine) do table.insert(out, it) end
+                end
+                for _, it in ipairs(keep) do table.insert(out, it) end
+                items = out
+                local at
+                for i, it in ipairs(items) do
+                        if it.Header and it.Text == "START" then at = i break end
+                end
+                table.insert(items, at and (at + 1) or (#items + 1), { Text = "Pinned messages (" .. #self.Pinned .. ")...", Callback = function() self:ShowPins() end })
+        end
+        return P.Menu(self, items, anchor)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        local chat = P.CreateChat(self, cfg)
+        if chat then
+                pcall(function() chat:_InitChatName() end)
+                pcall(function() chat:_InitPins() end)
+                pcall(function() chat:_InitLeave() end)
+        end
+        return chat
+end
+
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = P.BuildSettingsTab(self, window)
+        if tab and not tab._p49 then
+                tab._p49 = true
+                pcall(function()
+                        local sub = tab.Subs[1]
+                        local gb
+                        for _, g in ipairs(sub.Groupboxes) do if g.Name == "Chat" then gb = g end end
+                        gb = gb or sub:AddRightGroupbox("Chat", { Icon = "message-square", Collapsible = true })
+                        gb:AddInput("__ChatName", { Text = "Chat display name", Placeholder = "What people should call you", Default = Lib:LoadChatName(), MaxLength = 24, IgnoreConfig = true,
+                                Tooltip = "The name shown on your chat messages. Empty = your Roblox display name.",
+                                Callback = function(v) Lib:SetChatName(v) end })
+                        gb:AddButton({ Text = "Use my Roblox name", Func = function()
+                                Lib:SetChatName("")
+                                local o = Lib.Options.__ChatName
+                                if o then o:SetValue("", true) end
+                                Lib:Notify({ Title = "Chat", Text = "Using your Roblox display name again.", Type = "success", Duration = 2.5 })
+                        end })
+                        gb:AddLabel("New messages use this name. Messages you already sent keep the name they had.")
+                end)
+        end
+        return tab
+end
+
+end
+-- ===================== end patch 4.9.1 =====================
+
 return Lib
