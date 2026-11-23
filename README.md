@@ -1,4 +1,4 @@
-## THIS WAS MADE COMPLETELY USING CLAUDE 
+## THIS WAS MADE COMPLETELY USING CLAUDE
 
 
 # Aether UI
@@ -34,18 +34,41 @@ Lib:LoadAutoload()
 
 Press **RightShift** to hide or show the menu. On mobile, use the floating button.
 
+## CreateWindow options
+
+Every option is optional.
+
+```lua
+local Window = Lib:CreateWindow({
+    Title = "MyHub",               -- becomes Lib.Name
+    Subtitle = "My script hub",
+    Icon = "zap",
+    Folder = "MyHub",              -- config folder
+    Version = "1.0.0",             -- stored as Lib.Version
+    EnvKey = "__MyHubUI",          -- getgenv() key used to stop double-loading
+    ChannelsKey = "MyHubChannels", -- getgenv() key for extra chat channels
+    ChatUrl = "https://your-worker.workers.dev", -- chat relay, or false for no chat server
+})
+```
+
+- `EnvKey` unloads the previous instance stored under that key, so re-running the script replaces the old UI instead of stacking a second one.
+- `ChannelsKey`: another script can fill `getgenv().MyHubChannels` with `{ ["Channel name"] = placeId }` before this one loads, and those channels show up in the chat.
+- `ChatUrl` sets the chat relay for the whole library. The default baked into the source points at the original author's worker, so set your own here. `ChatUrl = false` runs the UI with no chat server at all.
+- Want a fully rebranded source? Find and replace the two remaining `"[Aether] "` console prefixes in the code.
+
 ## Features
 
 - **Tabs and sub-tabs** with icons (Lucide icon names) and a scrollable sidebar
 - **Two-column groupboxes**, collapsible with an animation, that switch to one column on small screens
-- **Many elements:** toggles, checkboxes, buttons, sliders, ranges, inputs, text areas, dropdowns (single, multi, searchable, player list), segmented controls, color pickers, keybinds, labels, paragraphs, callouts, images, stats, progress bars and logs
+- **Many elements:** toggles, checkboxes, buttons, sliders, ranges, inputs, text areas, dropdowns (single, multi, searchable, player list), segmented controls, color pickers (HSV / RGB sliders, preset swatches, copy hex), keybinds, labels, paragraphs, callouts, images, stats, progress bars and logs
 - **Dependency boxes** that show or hide options based on a toggle
-- **Settings tab** with themes, accent colors, UI scale, transparency, configs and autoload
+- **Settings tab** with themes, accent colors, UI fonts, UI scale, transparency, configs and autoload
+- **Fonts:** every Roblox font (`Enum.Font`) — change the font of the whole UI in Settings > Interface > Typography (saved between sessions) and style your chat name with any of them
 - **Configs** saved to your executor's workspace, with import/export by text
 - **ESP preview:** a real 3D viewport you can rotate and zoom, wired to your ESP options
 - **Fullscreen mode** for the window and the chat
-- **Chat** with channels, DMs, group chats, friends, replies, mentions, image search, link previews and message search
-- **Mobile friendly:** touch dragging, touch calibration and larger hit areas
+- **Chat** with channels, DMs, group chats, friends, replies, mentions, image search, link previews, message search and deleting your own messages
+- **Mobile friendly:** touch dragging, automatic touch calibration and larger hit areas
 - **Notifications, dialogs and prompts**
 
 ## Elements
@@ -72,6 +95,7 @@ Box:AddDropdown("Id", { Text = "Filters", Values = { "A", "B", "C" }, Multi = tr
 Box:AddDropdown("Id", { Text = "Player", SpecialType = "Player", ExcludeLocalPlayer = true, AllowNull = true })
 Box:AddSegmented("Id", { Text = "Style", Values = { "Low", "Mid", "High" }, Default = 2 })
 Box:AddLabel("Color"):AddColorPicker("Id", { Default = Color3.new(1, 1, 1), Transparency = 0.2 })
+-- popup: color square, hue + alpha bars, hex box, Rainbow, HSV / RGB sliders, presets and copy hex
 Box:AddLabel("Key"):AddKeyPicker("Id", { Default = "F", Mode = "Toggle" }) -- Toggle | Hold | Always
 
 -- Add-ons chain on toggles too
@@ -182,6 +206,8 @@ Lib:CreateChat({
 })
 ```
 
+The `Url` here beats `ChatUrl` from `CreateWindow`, which beats the default relay baked into the library. Pass `ChatUrl = false` in `CreateWindow` if you don't want a chat server at all.
+
 The chat needs the relay (a Cloudflare Worker with one Durable Object). The Cloudflare free plan has daily limits, so a busy chat may need the paid plan.
 
 ## Configs
@@ -213,5 +239,3 @@ A complete demo with every element, a combat and visuals setup and a components 
 [`library.lua`](library.lua)
 
 ## License
-
-Add your license here.
