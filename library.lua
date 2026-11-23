@@ -10030,4 +10030,1401 @@ end
 end
 -- ===================== end patch 4.6 =====================
 
+-- ===================== Aether patch 4.7 =====================
+-- Paste this whole block right above the final `return Lib` (after patch 4.6).
+-- Adds:
+--   * emoji reactions (PC: hover bar + right-click menu, mobile: long-press sheet, double-tap to react)
+--   * DM read receipts ("Read 12:34"), on by default, DMs only, toggle in Settings > Interface > Chat
+--   * Auto correct (LanguageTool through your worker), toggle in Settings > Interface > Chat
+--   * multi-select invites for group chats
+--   * smarter Lucide lookup (renamed icons, second icon source, letter fallback instead of a dot)
+-- Needs the v2.3 worker (/react, /spell, read receipts, /group/invite with uids).
+do
+local P = {}
+Lib.Version = "4.7.0"
+
+-- ==================== 0) CHAT PREFS (saved to <Folder>/chatprefs.json) ====================
+Lib.ChatPrefs = { ReadReceipts = true, AutoCorrect = true, DoubleTap = "👍", Recent = {} }
+Lib.QuickEmoji = { "👍", "❤️", "😂", "💀", "🔥", "😮" }
+
+do
+        local loaded, tick = false, 0
+        local function Path() return Lib.ConfigFolder .. "/chatprefs.json" end
+
+        function Lib:LoadChatPrefs()
+                if loaded then return self.ChatPrefs end
+                loaded = true
+                if FsOk() then
+                        pcall(function()
+                                local p = Path()
+                                if not isfile(p) then return end
+                                local d = HttpService:JSONDecode(readfile(p))
+                                if type(d) ~= "table" then return end
+                                local c = self.ChatPrefs
+                                if type(d.rr) == "boolean" then c.ReadReceipts = d.rr end
+                                if type(d.ac) == "boolean" then c.AutoCorrect = d.ac end
+                                if type(d.dbl) == "string" and #d.dbl > 0 and #d.dbl <= 16 then c.DoubleTap = d.dbl end
+                                if type(d.recent) == "table" then
+                                        for _, e in ipairs(d.recent) do
+                                                if type(e) == "string" and #c.Recent < 16 then table.insert(c.Recent, e) end
+                                        end
+                                end
+                        end)
+                end
+                return self.ChatPrefs
+        end
+
+        function Lib:SaveChatPrefs()
+                if not FsOk() then return end
+                tick = tick + 1
+                local t = tick
+                task.delay(0.6, function()
+                        if t ~= tick then return end
+                        pcall(function()
+                                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                                local c = Lib.ChatPrefs
+                                writefile(Path(), HttpService:JSONEncode({ rr = c.ReadReceipts, ac = c.AutoCorrect, dbl = c.DoubleTap, recent = c.Recent }))
+                        end)
+                end)
+        end
+
+        function Lib:PushRecentEmoji(e)
+                local r = self.ChatPrefs.Recent
+                for i = #r, 1, -1 do if r[i] == e then table.remove(r, i) end end
+                table.insert(r, 1, e)
+                while #r > 16 do table.remove(r) end
+                self:SaveChatPrefs()
+        end
+end
+
+-- ==================== 1) ICONS: fewer dots ====================
+-- Lookup order: your CustomIcons / aliases -> the icon pack (name, lowercase, renamed variants) -> a second pack
+-- loaded in the background -> a letter/glyph instead of a dot. Icons that were dots get fixed as soon as the pack loads.
+do
+        local Alias = {
+                ["triangle-alert"] = { "alert-triangle" }, ["alert-triangle"] = { "triangle-alert" },
+                ["circle-alert"] = { "alert-circle" }, ["alert-circle"] = { "circle-alert" },
+                ["octagon-alert"] = { "alert-octagon" }, ["alert-octagon"] = { "octagon-alert" },
+                ["circle-check"] = { "check-circle" }, ["check-circle"] = { "circle-check" },
+                ["circle-x"] = { "x-circle" }, ["x-circle"] = { "circle-x" },
+                ["list-filter"] = { "filter" }, ["filter"] = { "list-filter" },
+                ["users-round"] = { "users" }, ["user-round"] = { "user" },
+                ["gamepad-2"] = { "gamepad" }, ["gamepad"] = { "gamepad-2" },
+                ["move-diagonal-2"] = { "move-diagonal", "maximize-2" },
+                ["rotate-3d"] = { "rotate-3-d", "rotate-cw", "refresh-cw" },
+                ["layout-panel-left"] = { "panel-left", "sidebar", "layout-sidebar" },
+                ["ellipsis"] = { "more-horizontal" }, ["more-horizontal"] = { "ellipsis" },
+                ["ellipsis-vertical"] = { "more-vertical" }, ["more-vertical"] = { "ellipsis-vertical" },
+                ["trash-2"] = { "trash" }, ["trash"] = { "trash-2" },
+                ["pencil"] = { "edit-2", "pen" }, ["edit"] = { "square-pen", "pencil" }, ["square-pen"] = { "edit", "pencil" },
+                ["terminal"] = { "square-terminal", "terminal-square" },
+                ["smile-plus"] = { "smile", "laugh" },
+                ["scan-face"] = { "scan", "user" },
+                ["focus"] = { "crosshair", "target" },
+                ["reply"] = { "corner-up-left", "undo-2" },
+                ["copy"] = { "clipboard-copy", "clipboard" },
+                ["eye-off"] = { "eye-closed" },
+                ["ban"] = { "slash", "circle-slash" },
+                ["at-sign"] = { "at" },
+                ["link"] = { "link-2", "external-link" },
+                ["send"] = { "send-horizontal" },
+                ["refresh-cw"] = { "refresh-ccw", "rotate-cw" },
+                ["settings"] = { "settings-2", "cog" },
+                ["megaphone"] = { "volume-2" },
+        }
+        local Glyph = { x = "×", check = "✓", plus = "+", minus = "-", ["chevron-left"] = "<", ["chevron-right"] = ">", ["chevron-down"] = "v", ["chevron-up"] = "^",
+                send = ">", search = "?", bell = "!", pin = "*", link = "o", reply = "<", ["at-sign"] = "@", ["smile-plus"] = "+", ellipsis = "...", ["message-square"] = "#" }
+        local Hit, Extra, Pending = {}, {}, {}
+        local loading, loadedExtra = false, false
+        Lib.IconAlias = Lib.IconAlias or {}
+
+        local function Query(mod, nm)
+                local ok, r = pcall(function()
+                        local fn = mod.Icon or mod.GetIcon or mod.icon
+                        return fn(nm)
+                end)
+                if not (ok and r) then return nil end
+                if type(r) == "string" then return { Image = r } end
+                if type(r) == "table" then
+                        local img = r[1] or r.Image or r.Id or r.id
+                        local rect = type(r[2]) == "table" and r[2] or r
+                        local pos = rect.ImageRectPosition or rect.ImageRectOffset or rect.Position
+                        local sz = rect.ImageRectSize or rect.Size
+                        if img then return { Image = img, Pos = pos, Size = sz } end
+                end
+                return nil
+        end
+
+        local function Variants(name)
+                local out, seen = {}, {}
+                local function Add(n) if n and n ~= "" and not seen[n] then seen[n] = true out[#out + 1] = n end end
+                Add(Lib.IconAlias[name])
+                Add(name)
+                local l = (name:lower():gsub("_", "-"))
+                l = (l:gsub("^lucide[%-:]", ""))
+                Add(l)
+                Add(Lib.IconAlias[l])
+                for _, a in ipairs(Alias[l] or {}) do Add(a) end
+                Add((l:gsub("%-%d+$", "")))
+                return out
+        end
+
+        local function Refresh()
+                for i = #Pending, 1, -1 do
+                        local p = Pending[i]
+                        local img = p[1]
+                        if not img.Parent then
+                                table.remove(Pending, i)
+                        else
+                                local r = ResolveIcon(p[2])
+                                if r then
+                                        img.Image = ToAsset(r.Image)
+                                        if r.Pos then img.ImageRectOffset = r.Pos end
+                                        if r.Size then img.ImageRectSize = r.Size end
+                                        local t = img:FindFirstChildOfClass("TextLabel")
+                                        if t then t:Destroy() end
+                                        table.remove(Pending, i)
+                                end
+                        end
+                end
+        end
+
+        local function LoadExtra()
+                if loadedExtra or loading or Lib.Unloaded then return end
+                loading = true
+                task.spawn(function()
+                        for _, src in ipairs(Lib.IconSources) do
+                                local body = Fetch(src)
+                                local fn = body and loadstring(body)
+                                if fn then
+                                        local ok, mod = pcall(fn)
+                                        if ok and type(mod) == "table" then
+                                                if mod.SetIconsType then pcall(mod.SetIconsType, "lucide") end
+                                                if Probe(mod) then table.insert(Extra, mod) end
+                                        end
+                                end
+                        end
+                        loadedExtra, loading = true, false
+                        for k, v in pairs(Hit) do if v == false then Hit[k] = nil end end
+                        Refresh()
+                end)
+        end
+
+        ResolveIcon = function(name)
+                name = tostring(name)
+                local c = Hit[name]
+                if c ~= nil then return c or nil end
+                local res = false
+                if Lib.CustomIcons[name] then
+                        res = { Image = Lib.CustomIcons[name] }
+                elseif name:find("rbxasset") then
+                        res = { Image = name }
+                else
+                        for _, nm in ipairs(Variants(name)) do
+                                if IconMod then res = Query(IconMod, nm) end
+                                if not res then
+                                        for _, m in ipairs(Extra) do
+                                                res = Query(m, nm)
+                                                if res then break end
+                                        end
+                                end
+                                if res then break end
+                        end
+                        res = res or false
+                end
+                Hit[name] = res
+                return res or nil
+        end
+
+        local origIcon = Lib.Icon
+        function Lib.Icon(name, size, key, props, fallback)
+                if fallback == nil then
+                        local n = tostring(name)
+                        fallback = Glyph[n] or n:sub(1, 1):upper()
+                end
+                local img = origIcon(name, size, key, props, fallback)
+                if img and img:FindFirstChildOfClass("TextLabel") then
+                        table.insert(Pending, { img, tostring(name) })
+                        task.defer(LoadExtra)
+                end
+                return img
+        end
+
+        function Lib:HasIcon(name) return ResolveIcon(name) ~= nil end
+
+        -- Lib:AddIcon("my-icon", 1234567890)  or  Lib:AddIcon("my-icon", sheetId, Vector2.new(x, y), Vector2.new(w, h))
+        function Lib:AddIcon(name, asset, pos, size)
+                name = tostring(name)
+                if pos then Hit[name] = { Image = asset, Pos = pos, Size = size } else self.CustomIcons[name] = asset Hit[name] = nil end
+                Refresh()
+        end
+
+        -- Lib:AliasIcon("my-name", "real-lucide-name")
+        function Lib:AliasIcon(name, target)
+                self.IconAlias[tostring(name)] = tostring(target)
+                Hit[tostring(name)] = nil
+                Refresh()
+        end
+
+        function Lib:AddIconSource(url)
+                table.insert(self.IconSources, url)
+                loadedExtra = false
+                LoadExtra()
+        end
+
+        function Lib:ReloadIcons() loadedExtra = false for k in pairs(Hit) do Hit[k] = nil end LoadExtra() end
+
+        -- prints which names can't be found: Lib:IconReport({ "swords", "crown" })
+        function Lib:IconReport(names)
+                local miss = {}
+                for _, n in ipairs(names) do if not ResolveIcon(n) then miss[#miss + 1] = n end end
+                if #miss > 0 then warn("[Aether] icons not found: " .. table.concat(miss, ", ")) else print("[Aether] all icons found") end
+                return miss
+        end
+
+        -- if the first pack never loaded (no HTTP at startup), try again in the background
+        task.delay(2.5, function() if not IconMod then LoadExtra() end end)
+end
+
+-- ==================== 2) REACTIONS ====================
+local Cats = {
+        { "😀", "Smileys", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 😴 🤤 😪 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👹 👺 👻 👽 🤖" },
+        { "👍", "Gestures", "👍 👎 👌 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👋 🤚 ✋ 🖖 👏 🙌 🤝 🙏 💪 ✍️ 🤳 👀 🧠 👑 🦾" },
+        { "❤️", "Hearts & symbols", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💯 💢 💥 💫 💦 💨 🔥 ⭐ 🌟 ✨ ⚡ ✅ ❌ ⭕ ❗ ❓ ‼️ ⁉️ 💤 🎉 🎊" },
+        { "🐶", "Animals & food", "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦄 🐝 🦋 🐢 🐍 🐙 🦈 🐬 🍎 🍌 🍉 🍓 🍕 🍔 🍟 🌭 🍿 🍩 🍪 🎂 🍰 🍫 🍺 ☕" },
+        { "🎮", "Objects", "🎮 🎯 🎲 ⚽ 🏀 🏈 🎸 🎵 🎧 📱 💻 💡 💰 💎 🔑 🚀 🏆 🔔 📌 🔒 🔓 ⚔️ 🛡️ 💣 🧪 🎁 🌈 ☀️ 🌙 ❄️" },
+}
+
+do
+        local function MeId() return LocalPlayer.UserId end
+
+        local function Mine(entry)
+                for _, u in ipairs(entry.u or {}) do if tonumber(u) == MeId() then return true end end
+                return false
+        end
+
+        local function Has(list, emoji)
+                for _, r in ipairs(list or {}) do if r.e == emoji and Mine(r) then return true end end
+                return false
+        end
+
+        -- returns a new reaction list with my reaction toggled (or only added)
+        local function Toggled(list, emoji, addOnly)
+                local out, found = {}, false
+                for _, r in ipairs(list or {}) do
+                        local u = {}
+                        for _, x in ipairs(r.u or {}) do u[#u + 1] = x end
+                        if r.e == emoji then
+                                found = true
+                                local at
+                                for i, x in ipairs(u) do if tonumber(x) == MeId() then at = i break end end
+                                if at then
+                                        if not addOnly then table.remove(u, at) end
+                                else
+                                        u[#u + 1] = MeId()
+                                end
+                        end
+                        if #u > 0 then out[#out + 1] = { e = r.e, u = u } end
+                end
+                if not found then out[#out + 1] = { e = emoji, u = { MeId() } } end
+                return out
+        end
+
+        function Chat:_RenderReactions(item, list)
+                local col = item and item:FindFirstChild("Col")
+                if not col then return end
+                local meta = self.Meta[item]
+                if meta then meta.rx = list end
+                local row = col:FindFirstChild("Reacts")
+                if not list or #list == 0 then
+                        if row then row:Destroy() end
+                        return
+                end
+                local mineMsg = meta and meta.msg and tostring(meta.msg.uid) == tostring(LocalPlayer.UserId)
+                if not row then
+                        row = New("Frame", { Name = "Reacts", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, LayoutOrder = 3, Parent = col })
+                        local l = List(row, 4, Enum.FillDirection.Horizontal, mineMsg and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left)
+                        l.Wraps = true
+                end
+                for _, c in ipairs(row:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+                local msgId = meta and meta.msg and meta.msg.id
+                for i, r in ipairs(list) do
+                        local me = Mine(r)
+                        local chip = New("TextButton", { Text = tostring(r.e) .. " " .. #(r.u or {}), TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, H(22)), LayoutOrder = i,
+                                BackgroundTransparency = me and 0.7 or 0, Theme = { BackgroundColor3 = me and "Accent" or "Field", TextColor3 = me and "Text" or "SubText" }, Parent = row })
+                        Corner(chip, 11) Pad(chip, 8, 0, 8, 0)
+                        Stroke(chip, me and "Accent" or "Stroke", 1, me and 0.3 or 0.6)
+                        chip.Activated:Connect(function() if msgId then self:React(msgId, r.e) end end)
+                end
+                -- keep the column wide enough for a couple of chips per line
+                local maxCol = math.min(560, math.floor((self.Frame.Size.X.Offset - 44) * 0.8))
+                local need = math.min(maxCol, #list * 46 + 6)
+                if col.Size.X.Offset < need then col.Size = UDim2.new(0, need, 0, 0) end
+        end
+
+        function Chat:_SetReactions(id, list, evId)
+                local item = self.ByLid[id]
+                if not (item and item.Parent) then return end
+                local meta = self.Meta[item]
+                if evId and meta then
+                        if (meta.rxEv or -1) > evId then return end
+                        meta.rxEv = evId
+                end
+                self:_RenderReactions(item, list)
+        end
+
+        function Chat:React(id, emoji, addOnly)
+                if not (self.Request and id and emoji) then return end
+                local item = self.ByLid[id]
+                local meta = item and self.Meta[item]
+                local before = (meta and meta.rx) or {}
+                if addOnly and Has(before, emoji) then return end
+                local room = self.Room
+                if item then self:_RenderReactions(item, Toggled(before, emoji, addOnly)) end
+                Lib:PushRecentEmoji(emoji)
+                task.spawn(function()
+                        local d = Decode(self:_Do("/react", nil, "POST", HttpService:JSONEncode({ id = id, emoji = emoji }), room))
+                        if room ~= self.Room then return end
+                        if d and d.ok then
+                                self:_SetReactions(id, d.reactions or {})
+                        else
+                                self:_SetReactions(id, before)
+                                Lib:Notify({ Title = "Reactions", Text = (d and d.error) or "Couldn't react. Is your worker updated?", Type = "error", Duration = 4 })
+                        end
+                end)
+        end
+
+        -- full emoji picker (categories, recents, paste-your-own)
+        function Chat:EmojiPicker(cb, title)
+                local Z, W, HH = 130, 330, 396
+                local dim = New("TextButton", { Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.45, BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+                local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 1,
+                        Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+                Corner(card, 10) Stroke(card)
+                New("UIScale", { Scale = math.min(1, Lib.Overlay.AbsoluteSize.X / (W + 20), Lib.Overlay.AbsoluteSize.Y / (HH + 20)), Parent = card })
+                New("TextLabel", { Text = title or "Pick an emoji", Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -80, 0, 30), Position = UDim2.fromOffset(12, 0),
+                        TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+                local close = New("TextButton", { Text = "Close", TextSize = 12, Size = UDim2.fromOffset(52, 22), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 4),
+                        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+                Corner(close, 5)
+                local function Close() if dim.Parent then dim:Destroy() end end
+                close.Activated:Connect(Close)
+                dim.Activated:Connect(Close)
+                local tabH = H(30)
+                local bar = New("Frame", { Size = UDim2.new(1, -20, 0, tabH), Position = UDim2.fromOffset(10, 34), BackgroundTransparency = 1, ZIndex = Z + 2, Parent = card })
+                List(bar, 4, Enum.FillDirection.Horizontal)
+                local grid = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -(tabH + 34 + 6 + 44)), Position = UDim2.fromOffset(8, 34 + tabH + 6), AutomaticCanvasSize = Y,
+                        ScrollBarThickness = 3, ZIndex = Z + 2, Parent = card })
+                New("UIGridLayout", { CellSize = UDim2.fromOffset(38, 38), CellPadding = UDim2.fromOffset(2, 2), SortOrder = Enum.SortOrder.LayoutOrder, Parent = grid })
+                local tabs = {}
+                local function Fill(i)
+                        for _, c in ipairs(grid:GetChildren()) do if not c:IsA("UIGridLayout") then c:Destroy() end end
+                        local list = {}
+                        if i == 0 then
+                                for _, e in ipairs(Lib.ChatPrefs.Recent) do list[#list + 1] = e end
+                        else
+                                for w in Cats[i][3]:gmatch("%S+") do list[#list + 1] = w end
+                        end
+                        if #list == 0 then
+                                New("TextLabel", { Text = "Nothing here yet. React to something first.", TextSize = 12, Size = UDim2.new(1, 0, 0, 30), ZIndex = Z + 3, Theme = { TextColor3 = "Dim" }, Parent = grid })
+                        end
+                        for n, e in ipairs(list) do
+                                local b = New("TextButton", { Text = e, TextSize = 22, LayoutOrder = n, BackgroundTransparency = 1, BackgroundColor3 = Lib.Theme.FieldHover, ZIndex = Z + 3, Parent = grid })
+                                Corner(b, 6)
+                                b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.3 }, 0.06) end)
+                                b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+                                b.Activated:Connect(function() Close() Safe(cb, e) end)
+                        end
+                        for k, t in pairs(tabs) do
+                                t.BackgroundColor3 = (k == i) and Lib.Theme.Accent or Lib.Theme.Field
+                        end
+                end
+                local n = #Cats + 1
+                for i = 0, #Cats do
+                        local b = New("TextButton", { Text = i == 0 and "🕘" or Cats[i][1], TextSize = 16, Size = UDim2.new(1 / n, -4, 1, 0), LayoutOrder = i + 1, BackgroundTransparency = 0, ZIndex = Z + 3,
+                                Theme = { BackgroundColor3 = "Field" }, Parent = bar })
+                        Corner(b, 6)
+                        tabs[i] = b
+                        b.Activated:Connect(function() Fill(i) end)
+                end
+                local box = New("TextBox", { Text = "", PlaceholderText = "Paste any emoji...", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 13, Size = UDim2.new(1, -84, 0, 28),
+                        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -8), BackgroundTransparency = 0, TextXAlignment = LEFT, ZIndex = Z + 2,
+                        Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+                Corner(box, 5) Pad(box, 8, 0, 8, 0)
+                local use = New("TextButton", { Text = "Use", TextSize = 12, Size = UDim2.fromOffset(56, 28), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -10, 1, -8),
+                        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+                Corner(use, 5)
+                local function Take()
+                        local t = Trim(box.Text)
+                        if t == "" then return end
+                        Close()
+                        Safe(cb, t)
+                end
+                use.Activated:Connect(Take)
+                box.FocusLost:Connect(function(enter) if enter then Take() end end)
+                Fill(#Lib.ChatPrefs.Recent > 0 and 0 or 1)
+        end
+
+        -- the actions shared by the PC right-click menu and the mobile sheet
+        function Chat:_MenuItems(msg)
+                local name = tostring((msg.display ~= nil and msg.display ~= "") and msg.display or msg.name or "?")
+                local mine = tostring(msg.uid) == tostring(LocalPlayer.UserId)
+                local A, B, C, D = {}, {}, {}, {}
+                local snippet = tostring(msg.text ~= "" and msg.text or (msg.cfg and "[config]" or "[image]")):sub(1, 70)
+                if msg.id then
+                        table.insert(A, { Text = "Reply", Icon = "reply", Cb = function() self:SetReply({ id = msg.id, name = name, text = snippet }) end })
+                end
+                table.insert(A, { Text = "Mention", Icon = "at-sign", Cb = function() self:Prefill(self.Input.Text .. "@" .. tostring(msg.name) .. " ") end })
+                if type(setclipboard) == "function" and tostring(msg.text or "") ~= "" then
+                        table.insert(B, { Text = "Copy Text", Icon = "copy", Cb = function() setclipboard(tostring(msg.text)) end })
+                end
+                local link = tostring(msg.text or ""):match("https?://[^%s<>\"]+")
+                if link and type(setclipboard) == "function" then
+                        link = link:gsub("[%.,;:!%?%)%]]+$", "")
+                        table.insert(B, { Text = "Copy Link", Icon = "link", Cb = function() Copy(link, "Link copied") end })
+                end
+                if msg.id and type(setclipboard) == "function" then
+                        table.insert(B, { Text = "Copy Message ID", Icon = "hash", Cb = function() Copy(tostring(msg.id), "Message ID") end })
+                end
+                if msg.id then table.insert(B, { Text = "Hide for me", Icon = "eye-off", Cb = function() self:_Remove(msg.id) end }) end
+                if mine and msg.id then
+                        table.insert(C, { Text = "Edit Message", Icon = "pencil", Cb = function() self:EditMessage(msg) end })
+                        table.insert(C, { Text = "Delete Message", Icon = "trash-2", Danger = true, Cb = function() self:DeleteMessage(msg) end })
+                end
+                table.insert(D, { Text = "View Profile", Icon = "user", Cb = function() self:ShowProfile(msg) end })
+                if not mine and msg.uid then
+                        local blocked = Lib:IsBlocked(msg.uid)
+                        table.insert(D, { Text = blocked and "Unblock User" or "Block User", Icon = "ban", Danger = not blocked, Cb = function()
+                                if blocked then Lib:Unblock(msg.uid) else Lib:Block(msg.uid, name) end
+                        end })
+                end
+                return { A, B, C, D }
+        end
+
+        -- PC: right-click menu. Touch: the Discord-style sheet.
+        function Chat:OpenMessageMenu(msg, touch)
+                if not msg then return end
+                if touch or Lib.Touch then self:MessageSheet(msg) return end
+                local items = {}
+                if msg.id then
+                        table.insert(items, { Text = "Add reaction...", Callback = function() self:EmojiPicker(function(e) self:React(msg.id, e) end) end })
+                end
+                for _, g in ipairs(self:_MenuItems(msg)) do
+                        for _, it in ipairs(g) do table.insert(items, { Text = it.Text, Danger = it.Danger, Callback = it.Cb }) end
+                end
+                self:Menu(items, self.LastPtr)
+        end
+
+        -- the old "tap a message" handler: opening the menu now takes a right-click (PC) or a long-press (mobile)
+        function Chat:MessageMenu() end
+
+        function Chat:MessageSheet(msg)
+                local ov = Lib.Overlay
+                local vp = ov.AbsoluteSize
+                local s = Clamp(math.min(vp.X / 400, vp.Y / 430), 0.65, 1)
+                local W = 380
+                local Hh = math.min(560, math.floor((vp.Y - 8) / s))
+                local dim = New("TextButton", { Name = "MsgSheetDim", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = 120, Parent = ov })
+                Tween(dim, { BackgroundTransparency = 0.45 }, 0.2)
+                local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, Hh), AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, Hh + 20), ZIndex = 121,
+                        Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+                Corner(card, 16)
+                New("UIScale", { Scale = s, Parent = card })
+                local grab = New("Frame", { Size = UDim2.fromOffset(40, 4), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 8), Theme = { BackgroundColor3 = "Stroke" }, Parent = card })
+                Corner(grab, 2)
+                local scroll = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, -20), Position = UDim2.fromOffset(0, 20), AutomaticCanvasSize = Y, ScrollBarThickness = 2, Parent = card })
+                Pad(scroll, 12, 4, 12, 16)
+                List(scroll, 10)
+                local closed = false
+                local function Close()
+                        if closed then return end
+                        closed = true
+                        Tween(card, { Position = UDim2.new(0.5, 0, 1, Hh + 20) }, 0.18, Enum.EasingStyle.Quad)
+                        Tween(dim, { BackgroundTransparency = 1 }, 0.18)
+                        task.delay(0.22, function() if dim.Parent then dim:Destroy() end end)
+                end
+                dim.Activated:Connect(Close)
+                Tween(card, { Position = UDim2.new(0.5, 0, 1, 0) }, 0.24, Enum.EasingStyle.Quint)
+
+                local nm = tostring((msg.display ~= nil and msg.display ~= "") and msg.display or msg.name or "?")
+                local preview = tostring(msg.text ~= "" and msg.text or (msg.cfg and "[config]" or "[image]"))
+                New("TextLabel", { Text = "<b>" .. RichEsc(nm) .. "</b>  " .. RichEsc(preview:sub(1, 80)), RichText = true, TextSize = 12, Size = UDim2.new(1, 0, 0, 18), TextXAlignment = LEFT,
+                        TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = 0, Theme = { TextColor3 = "SubText" }, Parent = scroll })
+
+                if msg.id then
+                        local item = self.ByLid[msg.id]
+                        local meta = item and self.Meta[item]
+                        local row = New("Frame", { Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, LayoutOrder = 1, Parent = scroll })
+                        List(row, 6, Enum.FillDirection.Horizontal)
+                        local function Tile(order, text, fn, lit)
+                                local b = New("TextButton", { Text = text, TextSize = 24, Size = UDim2.new(1 / 7, -(6 * 6) / 7, 1, 0), LayoutOrder = order, BackgroundTransparency = 0,
+                                        Theme = { BackgroundColor3 = "Field" }, Parent = row })
+                                Corner(b, 10)
+                                if lit then Stroke(b, "Accent", 1.5, 0.2) end
+                                b.Activated:Connect(function() Close() fn() end)
+                        end
+                        for i, e in ipairs(Lib.QuickEmoji) do
+                                Tile(i, e, function() self:React(msg.id, e) end, Has(meta and meta.rx, e))
+                        end
+                        Tile(#Lib.QuickEmoji + 1, "+", function() self:EmojiPicker(function(e) self:React(msg.id, e) end) end, false)
+
+                        local hint = New("Frame", { Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, LayoutOrder = 2, Parent = scroll })
+                        List(hint, 5, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+                        New("TextLabel", { Text = "Double tap a message to", TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 20), LayoutOrder = 1, Theme = { TextColor3 = "Dim" }, Parent = hint })
+                        New("TextLabel", { Text = Lib.ChatPrefs.DoubleTap, TextSize = 15, AutomaticSize = X, Size = UDim2.fromOffset(0, 20), LayoutOrder = 2, Parent = hint })
+                        local edit = New("TextButton", { Text = "Edit", TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 20), LayoutOrder = 3, Theme = { TextColor3 = "Accent" }, Parent = hint })
+                        edit.Activated:Connect(function()
+                                Close()
+                                self:EmojiPicker(function(e)
+                                        Lib.ChatPrefs.DoubleTap = e
+                                        Lib:SaveChatPrefs()
+                                        Lib:Notify({ Title = "Reactions", Text = "Double tap now reacts with " .. e, Type = "success", Duration = 2.5 })
+                                end, "Double tap reaction")
+                        end)
+                end
+
+                local order = 3
+                for _, items in ipairs(self:_MenuItems(msg)) do
+                        if #items > 0 then
+                                order = order + 1
+                                local grp = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, LayoutOrder = order, BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field" }, Parent = scroll })
+                                Corner(grp, 10) List(grp, 0)
+                                for i, it in ipairs(items) do
+                                        local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, 44), LayoutOrder = i, Parent = grp })
+                                        Lib.Icon(it.Icon or "circle", 18, it.Danger and "Bad" or "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), Parent = b })
+                                        New("TextLabel", { Text = it.Text, TextSize = 14, Size = UDim2.new(1, -56, 1, 0), Position = UDim2.fromOffset(46, 0), TextXAlignment = LEFT,
+                                                TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = it.Danger and "Bad" or "Text" }, Parent = b })
+                                        if i < #items then
+                                                New("Frame", { Size = UDim2.new(1, -46, 0, 1), Position = UDim2.new(0, 46, 1, -1), BackgroundTransparency = 0.5, Theme = { BackgroundColor3 = "Stroke" }, Parent = b })
+                                        end
+                                        b.Activated:Connect(function() Close() Safe(it.Cb) end)
+                                end
+                        end
+                end
+        end
+
+        -- per message: right-click (PC), long-press (touch), double-tap / double-click (react)
+        function Chat:_HookItem(item, msg)
+                if not (msg and msg.id) then return end
+                local lastTap = 0
+                item.Activated:Connect(function()
+                        if os.clock() - (item:GetAttribute("lp") or 0) < 0.7 then return end
+                        local now = os.clock()
+                        if now - lastTap < 0.32 then
+                                lastTap = 0
+                                self:React(msg.id, Lib.ChatPrefs.DoubleTap, true)
+                        else
+                                lastTap = now
+                        end
+                end)
+                item.MouseButton2Click:Connect(function()
+                        self.LastPtr = UIS:GetMouseLocation() + Lib.PtrShift
+                        self:OpenMessageMenu(msg, false)
+                end)
+                item.InputBegan:Connect(function(input)
+                        if input.UserInputType ~= Enum.UserInputType.Touch then return end
+                        local start = input.Position
+                        local alive = true
+                        local c
+                        c = UIS.InputEnded:Connect(function(i) if i == input then alive = false c:Disconnect() end end)
+                        task.delay(0.42, function()
+                                if not alive then return end
+                                alive = false
+                                c:Disconnect()
+                                local cur = input.Position
+                                if (Vector2.new(cur.X, cur.Y) - Vector2.new(start.X, start.Y)).Magnitude > 14 then return end
+                                item:SetAttribute("lp", os.clock())
+                                self:OpenMessageMenu(msg, true)
+                        end)
+                end)
+        end
+
+        -- PC only: a little bar (quick reactions, add reaction, reply, more) follows the message under the mouse
+        function Chat:_InitReactUI()
+                if self._rxUI or Lib.Touch then return end
+                self._rxUI = true
+                local bar = Sink(New("Frame", { Name = "HoverBar", Size = UDim2.fromOffset(0, 28), AutomaticSize = X, Visible = false, ZIndex = 30,
+                        Theme = { BackgroundColor3 = "Surface" }, Parent = self.Frame }))
+                Corner(bar, 7) Stroke(bar, "Stroke", 1, 0.1) Pad(bar, 3, 3, 3, 3) List(bar, 2, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+                local function Cur()
+                        local it = self._hoverItem
+                        local m = it and self.Meta[it]
+                        return m and m.msg or nil
+                end
+                local function EBtn(text, order, fn)
+                        local b = New("TextButton", { Text = text, TextSize = 14, Size = UDim2.fromOffset(24, 22), LayoutOrder = order, BackgroundTransparency = 1, ZIndex = 31,
+                                Theme = { BackgroundColor3 = "FieldHover" }, Parent = bar })
+                        Corner(b, 5)
+                        b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.3 }, 0.06) end)
+                        b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+                        b.Activated:Connect(fn)
+                end
+                for i = 1, 3 do
+                        local e = Lib.QuickEmoji[i]
+                        EBtn(e, i, function() local m = Cur() if m and m.id then self:React(m.id, e) end end)
+                end
+                local function IBtn(icon, fb, tip, order, fn)
+                        local api = IconButton(bar, icon, fb, 22, tip, "Accent", 1)
+                        api.Button.LayoutOrder = order
+                        api.Button.Activated:Connect(fn)
+                end
+                IBtn("smile-plus", "+", "Add reaction", 4, function()
+                        local m = Cur()
+                        if m and m.id then self:EmojiPicker(function(e) self:React(m.id, e) end) end
+                end)
+                IBtn("reply", "<", "Reply", 5, function()
+                        local m = Cur()
+                        if not (m and m.id) then return end
+                        local nm = tostring((m.display ~= nil and m.display ~= "") and m.display or m.name or "?")
+                        self:SetReply({ id = m.id, name = nm, text = tostring(m.text ~= "" and m.text or (m.cfg and "[config]" or "[image]")):sub(1, 70) })
+                end)
+                IBtn("ellipsis", "...", "More", 6, function()
+                        local m = Cur()
+                        self.LastPtr = UIS:GetMouseLocation() + Lib.PtrShift
+                        if m then self:OpenMessageMenu(m, false) end
+                end)
+                local function Inside(f, m)
+                        local p, s = f.AbsolutePosition, f.AbsoluteSize
+                        return m.X >= p.X and m.X <= p.X + s.X and m.Y >= p.Y and m.Y <= p.Y + s.Y
+                end
+                Lib:Connect(RunService.RenderStepped, function()
+                        if not self.Frame.Parent then return end
+                        local show = false
+                        if self.PanelObj._shown and self.Frame.Visible and Lib.Visible and not Lib.Popup and not self.NotifOpen then
+                                local m = UIS:GetMouseLocation() + Lib.PtrShift
+                                if bar.Visible and self._hoverItem and self._hoverItem.Parent and Inside(bar, m) then
+                                        show = true
+                                elseif Inside(self.List, m) then
+                                        for i = #self.Items, 1, -1 do
+                                                local it = self.Items[i]
+                                                if it.Parent and it.Visible and self.Meta[it] and Inside(it, m) then
+                                                        self._hoverItem = it
+                                                        show = true
+                                                        break
+                                                end
+                                        end
+                                end
+                        end
+                        if show and self._hoverItem and self._hoverItem.Parent then
+                                local sc = math.max(Lib.Scale, 0.01)
+                                local fp, lp, ls = self.Frame.AbsolutePosition, self.List.AbsolutePosition, self.List.AbsoluteSize
+                                local ip, bs = self._hoverItem.AbsolutePosition, bar.AbsoluteSize
+                                local y = Clamp(ip.Y - 12 * sc, lp.Y, math.max(lp.Y, lp.Y + ls.Y - bs.Y)) - fp.Y
+                                local x = lp.X + ls.X - bs.X - 12 * sc - fp.X
+                                bar.Position = UDim2.fromOffset(x / sc, y / sc)
+                                bar.Visible = true
+                        else
+                                bar.Visible = false
+                        end
+                end)
+        end
+
+        P.AddMessage = Chat.AddMessage
+        function Chat:AddMessage(msg)
+                if type(msg) == "table" and msg.type == "react" then
+                        if msg.id and self.Seen[msg.id] then return nil end
+                        if msg.id then self.Seen[msg.id] = true end
+                        self:_SetReactions(msg.target, msg.reactions or {}, msg.id)
+                        return nil
+                end
+                local last = self.Items[#self.Items]
+                local res = P.AddMessage(self, msg)
+                local item = self.Items[#self.Items]
+                local meta = item and item ~= last and self.Meta[item]
+                if meta and meta.msg == msg and msg.id then
+                        pcall(function()
+                                self:_HookItem(item, msg)
+                                if type(msg.reactions) == "table" and #msg.reactions > 0 then self:_RenderReactions(item, msg.reactions) end
+                                if self.ReadMark then self:_PlaceRead() end
+                        end)
+                end
+                return res
+        end
+end
+
+-- ==================== 3) READ RECEIPTS (DMs only) ====================
+do
+        P.Do = Chat._Do
+        function Chat:_Do(path, query, method, body, room)
+                if path == "/poll" and room == nil and type(self.Room) == "string" and self.Room:sub(1, 3) == "dm:" then
+                        query = query or {}
+                        if query.peek == nil then
+                                local pr = Lib:LoadChatPrefs()
+                                local shown = self.PanelObj and self.PanelObj._shown and Lib.Visible and self.Frame and self.Frame.Visible
+                                query.rr = pr.ReadReceipts and "1" or "0"
+                                query.seen = (pr.ReadReceipts and shown and not self.Blocked) and "1" or "0"
+                        end
+                        local at = self.Room
+                        local res = P.Do(self, path, query, method, body, room)
+                        if res and res.StatusCode == 200 and query.peek == nil then
+                                local d = Decode(res)
+                                if d then pcall(function() self:_ApplyRead(at, d) end) end
+                        end
+                        return res
+                end
+                return P.Do(self, path, query, method, body, room)
+        end
+
+        function Chat:_ApplyRead(room, d)
+                if room ~= self.Room then return end
+                if d and d.ok and Lib.ChatPrefs.ReadReceipts and type(d.read) == "table" and tonumber(d.read.id) then
+                        self.ReadMark = { id = tonumber(d.read.id), ts = tonumber(d.read.ts) or 0 }
+                else
+                        self.ReadMark = nil
+                end
+                self:_PlaceRead()
+        end
+
+        -- "Read 12:34" under your newest message, only when they have seen it
+        function Chat:_PlaceRead()
+                if self._seenLbl then pcall(function() self._seenLbl:Destroy() end) self._seenLbl = nil end
+                local rm = self.ReadMark
+                if not rm or self.Room:sub(1, 3) ~= "dm:" or not Lib.ChatPrefs.ReadReceipts then return end
+                local me = tostring(LocalPlayer.UserId)
+                for i = #self.Items, 1, -1 do
+                        local it = self.Items[i]
+                        local meta = it.Parent and self.Meta[it]
+                        if meta and meta.msg and tostring(meta.msg.uid) == me and meta.msg.id then
+                                if meta.msg.id <= rm.id then
+                                        local col = it:FindFirstChild("Col")
+                                        if col then
+                                                local tm = ""
+                                                pcall(function() tm = os.date("%H:%M", math.floor(rm.ts / 1000)) end)
+                                                self._seenLbl = New("TextLabel", { Name = "SeenLbl", Text = "Read " .. tm, TextSize = 10, Size = UDim2.new(1, 0, 0, 12),
+                                                        TextXAlignment = RIGHT, LayoutOrder = 4, Theme = { TextColor3 = "Dim" }, Parent = col })
+                                        end
+                                end
+                                return
+                        end
+                end
+        end
+
+        P.SetChannel = Chat.SetChannel
+        function Chat:SetChannel(i)
+                self.ReadMark, self._acUndo, self._hoverItem = nil, nil, nil
+                if self._seenLbl then pcall(function() self._seenLbl:Destroy() end) self._seenLbl = nil end
+                return P.SetChannel(self, i)
+        end
+end
+
+-- ==================== 4) AUTO CORRECT ====================
+do
+        local AC = { cache = {}, ignore = {}, cool = 0 }
+        Lib.AC = AC
+        for w in ("lol lmao lmfao omg idk ngl tbh smh imo irl brb btw fyi gg ez rn ty thx pls plz rip wtf wth yea yeah nah bruh bro sus noob lowkey highkey yeet fr tho ur roblox aether bruhh ok okay ayy yup nope hehe haha hahaha uwu owo xd lil gonna wanna gotta kinda sorta dunno gimme lemme cuz cus tryna finna boutta ong frfr nvm nm wyd hbu wbu ikr ily jk atm tmr asap afk gl hf wp ggs"):gmatch("%S+") do AC.ignore[w] = true end
+        function Lib:AutoCorrectIgnore(word) AC.ignore[tostring(word):lower()] = true end
+
+        local function MatchCase(orig, fix)
+                if #orig > 1 and orig == orig:upper() then return fix:upper() end
+                if orig:sub(1, 1) ~= orig:sub(1, 1):lower() then return fix:sub(1, 1):upper() .. fix:sub(2) end
+                return fix
+        end
+
+        -- returns the lowercase word if it is worth checking
+        local function Candidate(word, sentStart)
+                local l = word:lower()
+                if #l < 3 or #l > 24 or not l:match("^[a-z']+$") or l:find("^'") or AC.ignore[l] then return nil end
+                local caps = select(2, word:gsub("%u", ""))
+                if caps > 0 and not (caps == 1 and sentStart and word:sub(1, 1):match("%u")) then return nil end
+                return l
+        end
+
+        -- applies everything already in the cache; also returns the words still to look up
+        function Lib:_ACPass(text)
+                local urls = {}
+                for a, b in text:gmatch("()https?://%S*()") do urls[#urls + 1] = { a, b } end
+                local out, last, need, seen = {}, 1, {}, {}
+                for s, word, e in text:gmatch("()([%a']+)()") do
+                        local c = text:sub(s - 1, s - 1)
+                        local skip = c == "@" or c == ":" or text:sub(e, e) == ":"
+                        if not skip then
+                                local b1, b2 = text:byte(s - 1), text:byte(e)
+                                if (b1 and b1 > 127) or (b2 and b2 > 127) then skip = true end
+                        end
+                        if not skip then
+                                for _, u in ipairs(urls) do if s >= u[1] and s < u[2] then skip = true break end end
+                        end
+                        if not skip then
+                                local pre = text:sub(1, s - 1)
+                                local sentStart = pre:match("^%s*$") ~= nil or pre:match("[%.!%?]%s+$") ~= nil
+                                local l = Candidate(word, sentStart)
+                                if l then
+                                        local fix = AC.cache[l]
+                                        if fix == nil then
+                                                if not seen[l] then seen[l] = true need[#need + 1] = l end
+                                        elseif fix ~= "" then
+                                                out[#out + 1] = text:sub(last, s - 1) .. MatchCase(word, fix)
+                                                last = e
+                                        end
+                                end
+                        end
+                end
+                out[#out + 1] = text:sub(last)
+                return table.concat(out), need
+        end
+
+        -- blocking: asks the worker (LanguageTool) about words we don't know yet
+        function Chat:_ACFetch(words)
+                if os.clock() < AC.cool then return false end
+                local need = {}
+                for _, w in ipairs(words) do if AC.cache[w] == nil then need[#need + 1] = w end end
+                for i = 1, #need, 8 do
+                        local part = {}
+                        for j = i, math.min(i + 7, #need) do part[#part + 1] = need[j] end
+                        local d = Decode(self:_Do("/spell", { w = table.concat(part, ",") }))
+                        if not (d and d.ok and type(d.r) == "table") then AC.cool = os.clock() + 8 return false end
+                        for _, w in ipairs(part) do
+                                local v = d.r[w]
+                                if type(v) == "string" then AC.cache[w] = v end
+                        end
+                        if d.busy then AC.cool = os.clock() + 6 return false end
+                end
+                return true
+        end
+
+        -- live: when you type a space / punctuation, the word before it is corrected. Backspace right after to undo.
+        function Chat:_InitAutoCorrect()
+                if self._acInit then return end
+                self._acInit = true
+                local input = self.Input
+                local prev = ""
+                input:GetPropertyChangedSignal("Text"):Connect(function()
+                        local t = input.Text
+                        if not Lib.ChatPrefs.AutoCorrect then prev = t return end
+                        if self._acExpect and t == self._acExpect then self._acExpect = nil prev = t return end
+                        local un = self._acUndo
+                        if un then
+                                self._acUndo = nil
+                                if t == un.after:sub(1, -2) then
+                                        AC.ignore[un.orig:lower()] = true
+                                        local restored = un.before:sub(1, -2)
+                                        self._acExpect = restored
+                                        input.Text = restored
+                                        input.CursorPosition = #restored + 1
+                                        prev = restored
+                                        return
+                                end
+                        end
+                        local grew = #t == #prev + 1 and t:sub(1, #prev) == prev
+                        prev = t
+                        if not grew or t:sub(1, 1) == "/" then return end
+                        local bc = t:sub(-1)
+                        if not bc:match("[%s%.,!%?;]") then return end
+                        local body = t:sub(1, -2)
+                        local ws, word = body:match("()([%a']+)$")
+                        if not word then return end
+                        local pre = body:sub(1, ws - 1)
+                        local c = pre:sub(-1)
+                        if c == "@" or c == ":" then return end
+                        local b1 = body:byte(ws - 1)
+                        if b1 and b1 > 127 then return end
+                        if pre:match("https?://%S*$") then return end
+                        local sentStart = pre:match("^%s*$") ~= nil or pre:match("[%.!%?]%s+$") ~= nil
+                        local l = Candidate(word, sentStart)
+                        if not l then return end
+                        local function Apply()
+                                local fix = AC.cache[l]
+                                if not fix or fix == "" or not input:IsFocused() then return end
+                                local cur = input.Text
+                                if cur:sub(ws, ws + #word - 1) ~= word or cur:sub(ws + #word, ws + #word) ~= bc then return end
+                                local newText = cur:sub(1, ws - 1) .. MatchCase(word, fix) .. cur:sub(ws + #word)
+                                self._acUndo = { orig = word, before = cur, after = newText }
+                                self._acExpect = newText
+                                prev = newText
+                                input.Text = newText
+                                input.CursorPosition = #newText + 1
+                        end
+                        if AC.cache[l] ~= nil then Apply() return end
+                        task.spawn(function() if self:_ACFetch({ l }) then Apply() end end)
+                end)
+        end
+
+        -- on send: whatever is left gets corrected too (waits up to 2.5s for the worker)
+        P.Send = Chat.Send
+        function Chat:Send(text)
+                text = Trim(text or "")
+                if text == "" or not Lib.ChatPrefs.AutoCorrect or not self.Request or self.Blocked then return P.Send(self, text) end
+                local fixed, need = Lib:_ACPass(text)
+                if #need == 0 then return P.Send(self, fixed) end
+                task.spawn(function()
+                        local done = false
+                        task.spawn(function() self:_ACFetch(need) done = true end)
+                        local t0 = os.clock()
+                        while not done and os.clock() - t0 < 2.5 do task.wait(0.05) end
+                        local final = Lib:_ACPass(text)
+                        P.Send(self, final)
+                end)
+        end
+end
+
+-- ==================== 5) MULTI-SELECT PICKER + GROUP INVITES ====================
+do
+        -- o = { Title, Confirm, Max, Exclude, Preselect = { users }, OnConfirm = function(list) }
+        function Chat:_MultiPick(o)
+                local picked = {}
+                for _, u in ipairs(o.Preselect or {}) do if u and u.uid then picked[tostring(u.uid)] = u end end
+                local function Count() local n = 0 for _ in pairs(picked) do n = n + 1 end return n end
+                local w, h = 290, H(420)
+                local frame = Sink(New("Frame", { Size = UDim2.fromOffset(w, h), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 0, ZIndex = 85,
+                        Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+                Corner(frame, 8) Stroke(frame, "Stroke", 1, 0)
+                New("UIScale", { Scale = math.min(1, Lib.Overlay.AbsoluteSize.X / (w + 20), Lib.Overlay.AbsoluteSize.Y / (h + 20)), Parent = frame })
+                New("TextLabel", { Text = o.Title or "Pick people", Font = Lib.FontBold, TextSize = 13, Size = UDim2.new(1, -24, 0, 18), Position = UDim2.fromOffset(12, 10),
+                        TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 86, Parent = frame })
+                local counter = New("TextLabel", { Text = "", TextSize = 10, Size = UDim2.new(1, -24, 0, 12), Position = UDim2.fromOffset(12, 30), TextXAlignment = LEFT,
+                        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 86, Theme = { TextColor3 = "Dim" }, Parent = frame })
+                local function Update()
+                        local names = {}
+                        for _, u in pairs(picked) do table.insert(names, tostring(u.display or u.name)) end
+                        table.sort(names)
+                        counter.Text = Count() .. " selected" .. (o.Max and (" · up to " .. o.Max) or "") .. (#names > 0 and ("  ·  " .. Short(table.concat(names, ", "), 30)) or "")
+                end
+                local top, foot = 48, H(28) + 14
+                self:PeopleBrowser({ Parent = frame, Position = UDim2.fromOffset(12, top), Size = UDim2.new(1, -24, 1, -(top + foot)), Z = 86, Exclude = o.Exclude,
+                        Scopes = { { "friends", "Friends" }, { "online", "Online" }, { "all", "Everyone" } },
+                        Scope = #self.Friends.friends > 0 and "friends" or "online",
+                        Mark = function(u) return picked[tostring(u.uid)] ~= nil end,
+                        OnClick = function(u, refresh)
+                                local id = tostring(u.uid)
+                                if picked[id] then
+                                        picked[id] = nil
+                                elseif o.Max and Count() >= o.Max then
+                                        Lib:Notify({ Title = "Group chat", Text = "Only " .. o.Max .. " more fit in this group.", Type = "warn", Duration = 4 })
+                                        return
+                                else
+                                        picked[id] = u
+                                end
+                                Update()
+                                refresh()
+                        end })
+                local row = New("Frame", { Size = UDim2.new(1, -24, 0, H(28)), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -10), BackgroundTransparency = 1, ZIndex = 86, Parent = frame })
+                List(row, 6, Enum.FillDirection.Horizontal)
+                local cancel = New("TextButton", { Text = "Cancel", TextSize = 12, Size = UDim2.new(0.5, -3, 1, 0), BackgroundTransparency = 0, ZIndex = 87, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = row })
+                Corner(cancel, 5)
+                local ok = New("TextButton", { Text = o.Confirm or "Done", TextSize = 12, Size = UDim2.new(0.5, -3, 1, 0), BackgroundTransparency = 0, ZIndex = 87, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = row })
+                Corner(ok, 5)
+                cancel.Activated:Connect(function() Lib:ClosePopup() end)
+                ok.Activated:Connect(function()
+                        local list = {}
+                        for _, u in pairs(picked) do list[#list + 1] = u end
+                        if #list == 0 then Lib:Notify({ Text = "Pick at least one person.", Type = "warn" }) return end
+                        Lib:ClosePopup()
+                        Safe(o.OnConfirm, list)
+                end)
+                Update()
+                Lib:OpenPopup(frame, function() if frame.Parent then frame:Destroy() end end)
+        end
+
+        -- gid = nil: choose the group first. gid set: tick as many people as you want, one tap invites them all.
+        function Chat:InviteToGroup(gid, preselect)
+                local groups = {}
+                for _, ch in ipairs(self.Channels) do if ch.kind == "grp" then groups[#groups + 1] = ch end end
+                if not gid then
+                        if #groups == 0 then self:NewGroup(preselect) return end
+                        local items = {}
+                        for _, g in ipairs(groups) do
+                                items[#items + 1] = { Text = "«" .. Short(g.name, 15) .. "»", Callback = function() self:InviteToGroup(g.gid, preselect) end }
+                        end
+                        items[#items + 1] = { Text = "New group with them...", Callback = function() self:NewGroup(preselect) end }
+                        self:Menu(items, self.LastPtr)
+                        return
+                end
+                local ch
+                for _, g in ipairs(groups) do if g.gid == gid then ch = g end end
+                local exclude, have = {}, 0
+                for _, m in ipairs((ch and ch.members) or {}) do
+                        local id = type(m) == "table" and m.uid or m
+                        exclude[tostring(id)] = true
+                        have = have + 1
+                end
+                exclude[tostring(LocalPlayer.UserId)] = true
+                local room = MAX_GROUP - math.max(have, 1)
+                if room <= 0 then
+                        Lib:Notify({ Title = "Group chat", Text = "That group is full (" .. MAX_GROUP .. " max).", Type = "warn" })
+                        return
+                end
+                local pre = {}
+                for _, u in ipairs(preselect or {}) do
+                        if u and u.uid and not exclude[tostring(u.uid)] and #pre < room then pre[#pre + 1] = u end
+                end
+                self:_MultiPick({ Title = "Invite to «" .. Short((ch and ch.name) or "group", 16) .. "»", Confirm = "Invite", Max = room, Exclude = exclude, Preselect = pre,
+                        OnConfirm = function(list)
+                                local uids = {}
+                                for _, u in ipairs(list) do uids[#uids + 1] = tonumber(u.uid) or u.uid end
+                                task.spawn(function()
+                                        local d = Decode(self:_Do("/group/invite", nil, "POST", HttpService:JSONEncode({ id = gid, uids = uids })))
+                                        if d and d.ok then
+                                                local n = tonumber(d.added) or #uids
+                                                local text = "Invited " .. n .. (n == 1 and " person." or " people.")
+                                                if (tonumber(d.skipped) or 0) > 0 then text = text .. " " .. d.skipped .. " didn't fit." end
+                                                Lib:Notify({ Title = "Group chat", Text = text, Type = "success", Duration = 4 })
+                                                self:_PollOnce()
+                                        else
+                                                Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't invite them. Is your worker updated?", Type = "error" })
+                                        end
+                                end)
+                        end })
+        end
+end
+
+-- ==================== 6) HOOKS + SETTINGS ====================
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        local chat = P.CreateChat(self, cfg)
+        if chat and not chat._p47 then
+                chat._p47 = true
+                Lib:LoadChatPrefs()
+                pcall(function() chat:_InitReactUI() end)
+                pcall(function() chat:_InitAutoCorrect() end)
+        end
+        return chat
+end
+
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = P.BuildSettingsTab(self, window)
+        if tab and not tab._p47 then
+                tab._p47 = true
+                pcall(function()
+                        local prefs = Lib:LoadChatPrefs()
+                        local sub = tab.Subs[1]
+                        local gb
+                        for _, g in ipairs(sub.Groupboxes) do if g.Name == "Chat" then gb = g end end
+                        gb = gb or sub:AddRightGroupbox("Chat", { Icon = "message-square", Collapsible = true })
+                        gb:AddToggle("ReadReceipts", { Text = "Read receipts (DMs only)", Default = prefs.ReadReceipts, IgnoreConfig = true,
+                                Tooltip = "Shows \"Read\" under your last DM once they've seen it, and lets them see when you've read theirs. Off hides both ways.",
+                                Callback = function(v)
+                                        prefs.ReadReceipts = v and true or false
+                                        Lib:SaveChatPrefs()
+                                        local c = Lib.ChatObj
+                                        if c then
+                                                if not v then c.ReadMark = nil end
+                                                c:_PlaceRead()
+                                        end
+                                end })
+                        gb:AddToggle("AutoCorrect", { Text = "Auto correct", Default = prefs.AutoCorrect, IgnoreConfig = true,
+                                Tooltip = "Fixes typos as you type (and when you send). Backspace right after a fix to undo it.",
+                                Callback = function(v) prefs.AutoCorrect = v and true or false Lib:SaveChatPrefs() end })
+                        gb:AddDropdown("DoubleTapReact", { Text = "Double-tap reaction", Values = { "👍", "❤️", "😂", "💀", "🔥", "😮", "✅", "❌" }, Default = prefs.DoubleTap, IgnoreConfig = true,
+                                Callback = function(v) if v then prefs.DoubleTap = v Lib:SaveChatPrefs() end end })
+                end)
+        end
+        return tab
+end
+
+end
+-- ===================== end patch 4.7 =====================
+
+-- ===================== Aether patch 4.8 =====================
+do
+local P = {}
+Lib.Version = "4.8.0"
+
+do
+        local loaded, tick = false, 0
+        local function Path() return Lib.ConfigFolder .. "/chatprefs.json" end
+        Lib.ChatPrefs.AutoCorrect = false
+
+        function Lib:LoadChatPrefs()
+                if loaded then return self.ChatPrefs end
+                loaded = true
+                local c = self.ChatPrefs
+                c.AutoCorrect = false
+                if FsOk() then
+                        pcall(function()
+                                local p = Path()
+                                if not isfile(p) then return end
+                                local d = HttpService:JSONDecode(readfile(p))
+                                if type(d) ~= "table" then return end
+                                if type(d.rr) == "boolean" then c.ReadReceipts = d.rr end
+                                if d.acv == 2 and type(d.ac) == "boolean" then c.AutoCorrect = d.ac end
+                                if type(d.dbl) == "string" and #d.dbl > 0 and #d.dbl <= 16 then c.DoubleTap = d.dbl end
+                                if type(d.recent) == "table" then
+                                        c.Recent = {}
+                                        for _, e in ipairs(d.recent) do
+                                                if type(e) == "string" and #c.Recent < 16 then table.insert(c.Recent, e) end
+                                        end
+                                end
+                        end)
+                end
+                return c
+        end
+
+        function Lib:SaveChatPrefs()
+                if not FsOk() then return end
+                tick = tick + 1
+                local t = tick
+                task.delay(0.6, function()
+                        if t ~= tick then return end
+                        pcall(function()
+                                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                                local c = Lib.ChatPrefs
+                                writefile(Path(), HttpService:JSONEncode({ rr = c.ReadReceipts, ac = c.AutoCorrect, acv = 2, dbl = c.DoubleTap, recent = c.Recent }))
+                        end)
+                end)
+        end
+end
+
+Lib.EmojiMaxVersion = 13
+Lib.EmojiSources = {
+        "https://cdn.jsdelivr.net/npm/emojibase-data@15/en/data.json",
+        "https://cdn.jsdelivr.net/npm/emojibase-data@15/en/compact.json",
+        "https://fastly.jsdelivr.net/npm/emojibase-data@15/en/data.json",
+        "https://fastly.jsdelivr.net/npm/emojibase-data@15/en/compact.json",
+}
+
+local Emoji = { list = nil, idx = nil, idxVer = nil, loading = false, waiters = {} }
+
+local function EmojiCache() return Lib.ConfigFolder .. "/cache/emoji_v2.json" end
+
+local function Slim(raw)
+        local out = {}
+        for _, e in ipairs(raw) do
+                local ch = e.emoji or e.unicode
+                local g = tonumber(e.group)
+                if type(ch) == "string" and g and g ~= 2 and g ~= 9 then
+                        out[#out + 1] = {
+                                e = ch, g = g, v = tonumber(e.version) or 0, o = tonumber(e.order) or 0,
+                                n = tostring(e.label or e.annotation or ""):lower(),
+                                t = type(e.tags) == "table" and table.concat(e.tags, " "):lower() or "",
+                        }
+                end
+        end
+        table.sort(out, function(a, b) return a.o < b.o end)
+        return out
+end
+
+function Lib:LoadEmojis(cb)
+        if Emoji.list then
+                if cb then Safe(cb, Emoji.list) end
+                return
+        end
+        if cb then table.insert(Emoji.waiters, cb) end
+        if Emoji.loading then return end
+        Emoji.loading = true
+        task.spawn(function()
+                local list
+                if FsOk() then
+                        pcall(function()
+                                local p = EmojiCache()
+                                if isfile(p) then
+                                        local d = HttpService:JSONDecode(readfile(p))
+                                        if type(d) == "table" and #d > 200 then list = d end
+                                end
+                        end)
+                end
+                if not list then
+                        for _, url in ipairs(Lib.EmojiSources) do
+                                local body = Fetch(url)
+                                local ok, raw = pcall(function() return HttpService:JSONDecode(body or "") end)
+                                if ok and type(raw) == "table" then
+                                        local s = Slim(raw)
+                                        if #s > 200 then
+                                                list = s
+                                                if FsOk() then
+                                                        pcall(function()
+                                                                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                                                                if not isfolder(Lib.ConfigFolder .. "/cache") then makefolder(Lib.ConfigFolder .. "/cache") end
+                                                                writefile(EmojiCache(), HttpService:JSONEncode(s))
+                                                        end)
+                                                end
+                                                break
+                                        end
+                                end
+                        end
+                end
+                Emoji.list, Emoji.loading = list, false
+                local w = Emoji.waiters
+                Emoji.waiters = {}
+                for _, f in ipairs(w) do Safe(f, list) end
+        end)
+end
+
+function Lib:ReloadEmojis()
+        Emoji.list, Emoji.idx = nil, nil
+        pcall(function() if FsOk() and isfile(EmojiCache()) and type(delfile) == "function" then delfile(EmojiCache()) end end)
+        self:LoadEmojis()
+end
+
+local function EmojiIndex()
+        local mv = Lib.EmojiMaxVersion
+        if Emoji.idx and Emoji.idxVer == mv then return Emoji.idx end
+        local by, all = {}, {}
+        for _, x in ipairs(Emoji.list or {}) do
+                if x.v <= mv then
+                        by[x.g] = by[x.g] or {}
+                        table.insert(by[x.g], x.e)
+                        all[#all + 1] = x
+                end
+        end
+        Emoji.idx, Emoji.idxVer = { by = by, all = all }, mv
+        return Emoji.idx
+end
+
+local EmojiGroups = {
+        { 0, "😀" }, { 1, "👋" }, { 3, "🐶" }, { 4, "🍔" }, { 5, "🚗" }, { 6, "⚽" }, { 7, "💡" }, { 8, "❤️" },
+}
+local EmojiFallback = {}
+for w in ("👍 ❤️ 😂 💀 🔥 😮 😢 😡 🎉 👏 🙏 💯 ✅ ❌ 🤔 😎 🥺 😭 😍 🤣 😅 😊 😉 🙄 😴 🤯 🥳 😤 🤝 👀 💪 🙌 👌 ✌️ 🤞 💔 💖 ⭐ ✨ ⚡ 🌈 🍕 🍔 🎮 🏆 🚀 💎 🐶 🐱 🦊 🐸"):gmatch("%S+") do
+        EmojiFallback[#EmojiFallback + 1] = w
+end
+
+function Chat:EmojiPicker(cb, title)
+        local Z, W, HH = 130, 340, 440
+        local dim = New("TextButton", { Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.45, BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+        local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 1,
+                Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+        Corner(card, 10) Stroke(card)
+        New("UIScale", { Scale = math.min(1, Lib.Overlay.AbsoluteSize.X / (W + 20), Lib.Overlay.AbsoluteSize.Y / (HH + 20)), Parent = card })
+        New("TextLabel", { Text = title or "Pick an emoji", Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -80, 0, 30), Position = UDim2.fromOffset(12, 0),
+                TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+        local close = New("TextButton", { Text = "Close", TextSize = 12, Size = UDim2.fromOffset(52, 22), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 4),
+                BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+        Corner(close, 5)
+        local function Close() if dim.Parent then dim:Destroy() end end
+        close.Activated:Connect(Close)
+        dim.Activated:Connect(Close)
+
+        local search = New("TextBox", { Text = "", PlaceholderText = "Search emoji...  (heart, fire, cat)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12,
+                Size = UDim2.new(1, -20, 0, 28), Position = UDim2.fromOffset(10, 34), BackgroundTransparency = 0, TextXAlignment = LEFT, ZIndex = Z + 2,
+                Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+        Corner(search, 5) Pad(search, 8, 0, 8, 0)
+
+        local tabH, barY = H(30), 68
+        local bar = New("Frame", { Size = UDim2.new(1, -20, 0, tabH), Position = UDim2.fromOffset(10, barY), BackgroundTransparency = 1, ZIndex = Z + 2, Parent = card })
+        List(bar, 4, Enum.FillDirection.Horizontal)
+        local gridY = barY + tabH + 6
+        local grid = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -(gridY + 44)), Position = UDim2.fromOffset(8, gridY), AutomaticCanvasSize = Y,
+                ScrollBarThickness = 3, ZIndex = Z + 2, Parent = card })
+        New("UIGridLayout", { CellSize = UDim2.fromOffset(38, 38), CellPadding = UDim2.fromOffset(2, 2), SortOrder = Enum.SortOrder.LayoutOrder, Parent = grid })
+        local status = New("TextLabel", { Text = "Loading emoji...", TextSize = 12, TextWrapped = true, Size = UDim2.new(1, -24, 0, 44), Position = UDim2.fromOffset(12, gridY + 8),
+                ZIndex = Z + 4, Theme = { TextColor3 = "Dim" }, Parent = card })
+
+        local data, fallback = nil, false
+        local gen, curKey = 0, nil
+        local tabs = {}
+
+        local function Highlight(key)
+                for k, b in pairs(tabs) do b.BackgroundColor3 = (k == key) and Lib.Theme.Accent or Lib.Theme.Field end
+        end
+
+        local function Clear()
+                for _, c in ipairs(grid:GetChildren()) do if not c:IsA("UIGridLayout") then c:Destroy() end end
+        end
+
+        local function Build(list, emptyText)
+                gen = gen + 1
+                local my = gen
+                Clear()
+                status.Visible = #list == 0
+                if #list == 0 then status.Text = emptyText or "Nothing here." return end
+                task.spawn(function()
+                        for i, e in ipairs(list) do
+                                if my ~= gen or not dim.Parent then return end
+                                local b = New("TextButton", { Text = e, TextSize = 22, LayoutOrder = i, BackgroundTransparency = 1, BackgroundColor3 = Lib.Theme.FieldHover, ZIndex = Z + 3, Parent = grid })
+                                Corner(b, 6)
+                                b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.3 }, 0.06) end)
+                                b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+                                b.Activated:Connect(function() Close() Safe(cb, e) end)
+                                if i % 40 == 0 then task.wait() end
+                        end
+                end)
+        end
+
+        local function ShowKey(key)
+                curKey = key
+                Highlight(key)
+                if key == "r" then
+                        local list = {}
+                        for _, e in ipairs(Lib.ChatPrefs.Recent) do list[#list + 1] = e end
+                        Build(list, "Nothing here yet. React to something first.")
+                elseif fallback then
+                        Build(EmojiFallback)
+                else
+                        Build((data and data.by[key]) or {}, "No emoji in this group.")
+                end
+        end
+
+        local n = #EmojiGroups + 1
+        for i = 1, n do
+                local key = i == 1 and "r" or EmojiGroups[i - 1][1]
+                local b = New("TextButton", { Text = i == 1 and "🕘" or EmojiGroups[i - 1][2], TextSize = 16, Size = UDim2.new(1 / n, -4, 1, 0), LayoutOrder = i,
+                        BackgroundTransparency = 0, ZIndex = Z + 3, Theme = { BackgroundColor3 = "Field" }, Parent = bar })
+                Corner(b, 6)
+                tabs[key] = b
+                b.Activated:Connect(function() search.Text = "" ShowKey(key) end)
+        end
+
+        local sTick = 0
+        search:GetPropertyChangedSignal("Text"):Connect(function()
+                sTick = sTick + 1
+                local t = sTick
+                task.delay(0.2, function()
+                        if t ~= sTick or not dim.Parent then return end
+                        local q = Trim(search.Text):lower()
+                        if q == "" then
+                                if curKey ~= nil then ShowKey(curKey) end
+                                return
+                        end
+                        if not data then
+                                Build({}, "Search needs the full emoji list, and it couldn't be downloaded.")
+                                return
+                        end
+                        Highlight(nil)
+                        local res = {}
+                        for _, x in ipairs(data.all) do
+                                if x.n:find(q, 1, true) or x.t:find(q, 1, true) then
+                                        res[#res + 1] = x.e
+                                        if #res >= 200 then break end
+                                end
+                        end
+                        Build(res, "No emoji match \"" .. q .. "\".")
+                end)
+        end)
+
+        local box = New("TextBox", { Text = "", PlaceholderText = "Paste any emoji...", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 13, Size = UDim2.new(1, -84, 0, 28),
+                AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -8), BackgroundTransparency = 0, TextXAlignment = LEFT, ZIndex = Z + 2,
+                Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+        Corner(box, 5) Pad(box, 8, 0, 8, 0)
+        local use = New("TextButton", { Text = "Use", TextSize = 12, Size = UDim2.fromOffset(56, 28), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -10, 1, -8),
+                BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+        Corner(use, 5)
+        local function Take()
+                local t = Trim(box.Text)
+                if t == "" then return end
+                Close()
+                Safe(cb, t)
+        end
+        use.Activated:Connect(Take)
+        box.FocusLost:Connect(function(enter) if enter then Take() end end)
+
+        local function Ready(list)
+                if not dim.Parent then return end
+                if list then
+                        data = EmojiIndex()
+                else
+                        fallback = true
+                        status.Text = "Couldn't download the emoji list (needs HTTP access). Showing a small set. You can still paste any emoji below."
+                end
+                ShowKey(#Lib.ChatPrefs.Recent > 0 and "r" or EmojiGroups[1][1])
+                if fallback then
+                        status.Visible = true
+                        status.Position = UDim2.fromOffset(12, gridY)
+                        grid.Position = UDim2.fromOffset(8, gridY + 50)
+                        grid.Size = UDim2.new(1, -16, 1, -(gridY + 50 + 44))
+                end
+        end
+        Lib:LoadEmojis(Ready)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        local chat = P.CreateChat(self, cfg)
+        task.delay(3, function() if not Lib.Unloaded then Lib:LoadEmojis() end end)
+        return chat
+end
+
+end
+-- ===================== end patch 4.8 =====================
+
 return Lib
