@@ -8,7 +8,7 @@ A full-featured Roblox UI library for script hubs. It runs on PC and mobile and 
 ## Quick start
 
 ```lua
-local Lib = loadstring(game:HttpGet("https://pastefy.app/Y9mMGj4P/raw"))()
+local Lib = loadstring(game:HttpGet("https://pastefy.app/Dclpfg2Y/raw"))()
 
 local Window = Lib:CreateWindow({
     Title = "Aether",
