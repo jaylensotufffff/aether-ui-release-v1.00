@@ -2,7 +2,7 @@
 --// AETHER UI - FULL EXAMPLE
 --// UI demonstration using the Aether library
 
-local Lib = loadstring(game:HttpGet("https://pastefy.app/ECmxkZ8c/raw"))()
+local Lib = loadstring(game:HttpGet("https://pastefy.app/OEH1jsPi/raw"))()
 
 --// WINDOW
 
