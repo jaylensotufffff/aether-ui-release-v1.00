@@ -3,7 +3,7 @@
 
 # Aether UI
 
-A full-featured Roblox UI library for script hubs. It runs on PC and mobile and ships with everything built in: tabs, a settings page, configs, a 3D ESP preview, a keybind list, a watermark, pinned on-screen buttons, a profile page and a live Discord-style chat (channels, DMs, groups, friends, reactions).
+A full-featured Roblox UI library for script hubs. It runs on PC and mobile and ships with everything built in: tabs, a settings page, configs, a 3D ESP preview, a keybind list, a watermark, pinned on-screen buttons, a profile page and a live Discord-style chat (Global chat, DMs, groups, friends, reactions).
 
 ## Quick start
 
@@ -36,11 +36,11 @@ Every option is optional.
 
 ```lua
 local Window = Lib:CreateWindow({
-    Title = "MyHub",               -- becomes Lib.Name
+    Title = "MyHub",               -- becomes Lib.Name; also your hub name on chat profile cards
     Subtitle = "My script hub",
     Icon = "zap",                  -- Lucide icon name
     Folder = "MyHub",              -- config folder
-    Version = "1.0.0",             -- stored as Lib.Version
+    Version = "1.0.0",             -- stored as Lib.Version; shows on your chat profile card
     Accent = Color3.fromRGB(139, 92, 246), -- starting accent color
     ToggleKey = Enum.KeyCode.RightShift,
     Sidebar = "icons",             -- "icons" (compact rail, default) or "full" (icons + names)
@@ -49,13 +49,12 @@ local Window = Lib:CreateWindow({
     SearchPlaceholder = "Search settings...",
 
     EnvKey = "__MyHubUI",          -- getgenv() key used to stop double-loading
-    ChannelsKey = "MyHubChannels", -- getgenv() key for extra chat channels
-    ChatUrl = "https://your-worker.workers.dev", -- chat relay, or false for no chat server
+    HubId = "myhub1",              -- optional short id for chat; default is made from Title + EnvKey + Folder
 
     -- built-ins: all on by default, set to false to skip one
     Settings = true,               -- Settings + ESP + Configs tabs
     ESPPreview = true,
-    Chat = true,                   -- or a table of CreateChat options, see Chat below
+    Chat = true,                   -- set false to skip the chat panel entirely
     Watermark = true,
     KeybindList = true,
     Autoload = true,               -- load the config you picked as autoload
@@ -63,10 +62,10 @@ local Window = Lib:CreateWindow({
 ```
 
 - `EnvKey` unloads the previous instance stored under that key, so re-running the script replaces the old UI instead of stacking a second one.
-- `ChannelsKey`: another script can fill `getgenv().MyHubChannels` with `{ ["Channel name"] = placeId }` before this one loads, and those channels show up in the chat.
-- `ChatUrl` sets the chat relay for the whole library. The default baked into the source points at the original author's worker, so set your own here. `ChatUrl = false` runs the UI with no chat server at all.
+- The chat server is **built in**. `ChatUrl`, `ChannelsKey` and per-game `Channels` are gone — the chat is Global + DMs + group chats, and profile cards show which hub everyone is on. To point the library at your own relay, change the `CHAT_URL` constant near the bottom of the source.
+- Your hub identity in chat comes from `Title` and `Version`: profile cards show it as "Using MyHub v1.0.0". Two different hubs with the same Title are told apart with a short id — "(another hub #3fa9)". Set `HubId` yourself to pin that id down.
 - `Chat = false` skips the chat panel entirely. `ESPPreview = false` also stops anything from building the preview later.
-- Want a fully rebranded source? Find and replace the `"[Aether] "` console prefixes (there are quite a few `warn` calls now, so use a global find and replace) and change `DefaultChatUrl`.
+- Want a fully rebranded source? Find and replace the `"[Aether] "` console prefixes (there are quite a few `warn` calls now, so use a global find and replace) and change the built-in `CHAT_URL` to your own relay.
 
 ## Features
 
@@ -82,7 +81,7 @@ local Window = Lib:CreateWindow({
 - **Configs** saved to your executor's workspace, with import/export by text, and **sharing in chat** (people can preview which features are on before copying)
 - **ESP preview:** a real 3D viewport you can rotate and zoom, wired to your ESP options
 - **Fullscreen mode** for the window and the chat, plus dockable side panels
-- **Chat** with channels, DMs, group chats, friends, reactions, replies, mentions, formatting, code blocks, join-me cards, pins, image search, link previews, message search and editing / deleting your own messages
+- **Chat** with a Global channel, DMs, group chats, friends, reactions, replies, mentions, formatting, code blocks, join-me cards, pins, image search, link previews, message search, slash commands, polls, ratings and editing / deleting your own messages
 - **Mobile friendly:** touch dragging, automatic touch calibration, larger hit areas, long-press menus
 - **Notifications, dialogs and prompts**
 
@@ -297,7 +296,7 @@ Lib:ReloadIcons()
 | `Lib:CreateWatermark({ Title, Position, ShowGame, ShowFPS, ShowPing })` | Game name, FPS and ping bar (built automatically) |
 | `Lib:CreateKeybindList()` | Live list of active keybinds (built automatically) |
 | `Lib:CreateESPPreview()` | 3D ESP preview panel (built automatically) |
-| `Lib:CreateChat({ ... })` | Chat panel (built automatically, see below) |
+| `Lib:CreateChat()` | Chat panel (built automatically, see Chat below) |
 | `Lib:LoadAutoload()` | Loads the config you set as autoload (runs automatically) |
 | `Lib:SetVisible(bool)` / `Lib:ToggleVisible()` | Show or hide the whole UI |
 | `Lib:Unload()` | Removes the UI and stops everything it started |
@@ -306,7 +305,7 @@ Lib:ReloadIcons()
 
 ### Settings tab
 
-- **Interface:** menu keybind, watermark / keybind list / ESP preview / chat panel switches, notifications, share-my-game-in-chat, hide my name, re-dock panels, reset position, reset all options, unload; appearance (theme, accent preset and color, UI size, auto fit, transparency, lock window, cursor offset); chat options; typography; chat name style.
+- **Interface:** menu keybind, watermark / keybind list / ESP preview / chat panel switches, notifications, share-my-game-in-chat, hide my name, re-dock panels, reset position, reset all options, unload; appearance (theme, accent preset and color, UI size, auto fit, transparency, lock window, cursor offset); chat options (layout, presence cards, read receipts); typography; chat name style.
 - **ESP:** every ESP option, plus preview rotate / speed / refresh.
 - **Configs:** save, load, overwrite, delete, autoload, import / export by text, share in chat, pinned buttons.
 
@@ -334,48 +333,43 @@ The matching flags in `Lib.Toggles` / `Lib.Options` are `ESPBox`, `ESPBoxStyle`,
 
 ## Chat
 
-The chat is a dockable panel (toggle it in Settings or from the sidebar). Wide layouts get a **Discord-style sidebar** (favorites, channels, DMs, groups); the **Compact** layout is the small single-column chat (Settings > Interface > Chat > Chat layout).
+The chat is a dockable panel (toggle it in Settings or from the sidebar). Wide layouts get a **Discord-style sidebar** (favorites, DMs, groups); the **Compact** layout is the small single-column chat (Settings > Interface > Chat > Chat layout).
+
+The chat server and the channel list are **built in**. Per-game channels are gone — the chat is **Global + DMs + group chats**. `ChatUrl`, `ChannelsKey`, `getgenv().<Name>Channels` and `CreateChat({ Url = ..., Channels = ... })` do nothing any more, and `Lib.ChatObj:AddChannel` is a stub. To use your own relay, change the `CHAT_URL` constant near the bottom of the source.
 
 ```lua
--- in CreateWindow:
-Chat = {
-    Channels = {
-        ["Blox Fruits"] = 2753915549, -- name = place id
-        ["Arsenal"] = 286090429,
-    },
-}
+-- skip the chat entirely, in CreateWindow:
+Chat = false
 
--- or call it yourself (it never builds a second chat; extra channels are added to the existing one)
-Lib:CreateChat({
-    Url = "https://your-worker.workers.dev",
-    Channels = { ["Blox Fruits"] = 2753915549 },
-})
-Lib.ChatObj:AddChannel("Arsenal", 286090429)
+-- or build it yourself (it never builds a second chat)
+Lib:CreateChat()
 ```
-
-The `Url` here beats `ChatUrl` from `CreateWindow`, which beats the default relay baked into the library. Pass `ChatUrl = false` in `CreateWindow` if you don't want a chat server at all.
 
 What it can do:
 
-- **Channels:** Global plus one per game you set. Unread badges, per-channel notification settings (All / Only @mentions / Nothing) and favorites.
+- **Global channel:** unread badges, favorites and per-room notification settings (All / Only @mentions / Nothing).
 - **Direct messages and group chats** (up to 10 people). Owners can rename, hand over ownership, invite several people at once and set a **group icon**. Drafts are saved per conversation.
 - **Friends:** requests, online status, message and **Join** a friend's server.
 - **Messages:** replies, @mentions (with suggestions), edit and delete your own, hide for yourself, block users, "NEW" divider, typing indicator, read receipts in DMs (toggle in Settings), pins in DMs and groups.
 - **Reactions:** hover bar on PC, long-press sheet on mobile, **double-tap / double-click** to react with your chosen emoji, full searchable emoji picker.
-- **Formatting:** `**bold**`, `*italic*`, `***both***`, `~~strike~~`, `` `inline code` ``, `||spoilers||`, and triple-backtick code blocks (with a Copy button). Use the **+** button for a code composer, **Share My Server** (a "Join me" card) and image search. `:fire:` style emoji shortcuts autocomplete.
+- **Formatting:** `**bold**`, `*italic*`, `***both***`, `~~strike~~`, `` `inline code` ``, `||spoilers||`, and triple-backtick code blocks (with a Copy button). Use the **+** button for a code composer, **Share My Server** (a "Join me" card) and **Share Config** (pick one of your saved configs to share). `:fire:` style emoji shortcuts autocomplete.
+- **Slash commands** in DMs and group chats: type `/` for suggestions and `/help` for the full list. `/me`, `/shrug`, `/tableflip`, `/roll 2d20`, `/flip`, `/8ball`, `/spoiler`, `/nick`, `/poll`, `/code`, `/join`, `/dm @user`, `/friend @user`, `/block @user`, `/invite @user`, `/rename`, `/mute`, `/mentions`, `/unmute`, `/clear`, `/search`, `/pins` and more. Start a message with `//` to send a literal slash.
+- **Polls** (DMs and group chats only): `/poll` opens a form, or `/poll Question | A | B | C`. 2 to 10 options, one vote each, tap your pick again to take it back. Polls can't be edited.
+- **Ratings:** shared config cards and code block messages get 👍 / 👎 buttons with a live tally ("42% liked · 3 ratings"). You can't rate your own posts.
+- **Presence:** a "PLAYING" bar in DMs shows the game your friend is in, the server size and a **Join** button (it warns you when the server is full); online friends get "PLAYING NOW" cards under the channel list. Toggle it in Settings > Interface > Chat > Presence cards. Your own game is shared with the "Share my game in chat" setting.
 - **Media:** image search (no GIFs), link previews and shared config cards with a preview of the enabled features.
-- **Tools:** message search (`from:name` works), a bell for mentions and replies, profile cards, optional auto correct (off by default), your own **chat display name**, bio and **name style** (color, gradient, font).
+- **Tools:** message search (`from:name` works), a bell for mentions and replies, profile cards that show **which hub someone is using** ("Using MyHub v1.0.0" — same-named hubs are told apart with a short id, like "(another hub #3fa9)"), optional auto correct (off by default), your own **chat display name**, bio and **name style** (color, gradient, font).
 - **Fullscreen** and a docking button to snap the panel back next to the menu.
 
 Message actions: right-click a message (PC) or long-press it (mobile).
 
-Helpers: `Lib:JoinServer(placeId, jobId, label)`, `Lib:CheckServer(placeId, jobId, cb)`, `Lib:Block(uid, name)`, `Lib:Unblock(uid)`, `Lib:IsBlocked(uid)`.
+Helpers: `Lib:JoinServer(placeId, jobId, label)`, `Lib:CheckServer(placeId, jobId, cb)`, `Lib:GameName(placeId, cb)`, `Lib:ServerSize(placeId, jobId, cb)`, `Lib:Block(uid, name)`, `Lib:Unblock(uid)`, `Lib:IsBlocked(uid)`.
 
-The chat needs the relay (a Cloudflare Worker with one Durable Object). It must be a recent version of the worker: reactions, read receipts, typing, pins, friends, group owners / icons, auto correct, config sharing and message deleting each use their own endpoint, and anything the worker doesn't support just shows an error in chat. The Cloudflare free plan has daily limits, so a busy chat may need the paid plan.
+The chat needs the relay (a Cloudflare Worker with one Durable Object, pointed at by the built-in `CHAT_URL`). It must be a recent version of the worker: reactions, read receipts, typing, pins, friends, group owners / icons, auto correct, config sharing, message deleting, image search, ratings and polls (both ride on reactions) and hub info (`hub` / `hid` / `hv` stored per user and returned from `/profile` — worker v2.5.1) each need their own endpoint or storage, and anything the worker doesn't support just shows an error in chat. The Cloudflare free plan has daily limits, so a busy chat may need the paid plan.
 
 ## Configs
 
-Configs are saved to `<workspace>/<Folder>/configs/*.json`. Use the **Settings > Configs** tab to create, load, overwrite and delete them, set an autoload config, copy and paste a config as text, or share one in chat (to any channel, DM or group). A config someone shares lands in your saved configs as a copy, it is never applied automatically. Add `IgnoreConfig = true` to an element to leave it out.
+Configs are saved to `<workspace>/<Folder>/configs/*.json`. Use the **Settings > Configs** tab to create, load, overwrite and delete them, set an autoload config, copy and paste a config as text, or share one in chat (to Global, a DM or a group). A config someone shares lands in your saved configs as a copy, it is never applied automatically. Add `IgnoreConfig = true` to an element to leave it out.
 
 ```lua
 Lib:SaveConfig("name")      -- returns ok, err
@@ -389,7 +383,7 @@ Lib:ApplyConfig(tbl)
 Lib:ResetAll()              -- every option back to its default
 ```
 
-Other files the library keeps in `<Folder>`: `pins.json`, `chatstate.json` (drafts, favorites), `chatprefs.json`, `chatnotif.json`, `chatname.txt`, `namestyle.json`, `uifont.txt`, `bio.txt`, `blocked.json`, `convos.json`, `groupicons.json`, `touchauto.json` and a `cache/` folder for images and emoji.
+Other files the library keeps in `<Folder>`: `pins.json`, `chatstate.json` (drafts, favorites), `chatprefs.json`, `chatnotif.json`, `chatextras.json` (presence cards on/off), `chatname.txt`, `namestyle.json`, `uifont.txt`, `bio.txt`, `blocked.json`, `convos.json`, `groupicons.json`, `touchauto.json` and a `cache/` folder for images and emoji.
 
 ## Controls
 
@@ -403,6 +397,7 @@ Other files the library keeps in `<Folder>`: `pins.json`, `chatstate.json` (draf
 | Pin a toggle / keybind | Right-click it | Long-press it |
 | Message menu | Right-click a message | Long-press a message |
 | React to a message | Double-click, or the hover bar | Double-tap |
+| Slash command suggestions | Type `/` in the box | Type `/` in the box |
 
 Touch input is calibrated automatically (the offset is learned from your taps and saved), and **Settings > Interface > Appearance > Cursor offset** is a manual override if clicks ever land away from your cursor.
 
