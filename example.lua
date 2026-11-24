@@ -377,7 +377,7 @@ end)
 Lib:CreateESPPreview()
 
 Lib:SetPreviewData({
-    Name = "Preview Player",
+    Name = game:GetService'Players'.LocalPlayer.Name
     Health = 75,
     MaxHealth = 100,
     Distance = 25
