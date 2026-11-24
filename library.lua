@@ -2850,7 +2850,7 @@ function Lib:CreateKeybindList(cfg)
                         end
                 end
                 for i = n + 1, #lines do lines[i].Visible = false end
-                frame.Visible = kl.Enabled and n > 0
+                frame.Visible = kl.Enabled and n > 0 and not (Lib.MainWindow and Lib.MainWindow.Fullscreen)
         end)
         self:MakeDraggable(frame, frame)
         function kl:SetVisible(s) self.Enabled = s and true or false if not self.Enabled then frame.Visible = false end end
@@ -13386,43 +13386,7 @@ function Chat:Send(text)
     if not ok then error(err, 0) end
 end
 
-function Chat:CodeComposer()
-    local langBox
-    Lib:Dialog({ Title = "Send code block", Text = "Paste or type your code. People can copy it, nothing runs automatically.",
-        Extra = function(card)
-            local lf = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = 3, ZIndex = 102, Theme = { BackgroundColor3 = "Field" }, Parent = card })
-            Corner(lf, 5) Stroke(lf, "Stroke", 1, 0.3)
-            langBox = New("TextBox", { Text = "lua", PlaceholderText = "language (optional)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12,
-                Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT, ZIndex = 103, Parent = lf })
-            local f = New("Frame", { Size = UDim2.new(1, 0, 0, 150), LayoutOrder = 3, ZIndex = 102, ClipsDescendants = true, Theme = { BackgroundColor3 = "Field" }, Parent = card })
-            Corner(f, 5) Stroke(f, "Stroke", 1, 0.3)
-            return New("TextBox", { Text = "", PlaceholderText = "Your code...", PlaceholderColor3 = Lib.Theme.Dim, MultiLine = true, TextWrapped = false,
-                Font = Enum.Font.Code, TextSize = 12, Size = UDim2.new(1, -16, 1, -12), Position = UDim2.fromOffset(8, 6), TextXAlignment = LEFT,
-                TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 103, Parent = f })
-        end,
-        Buttons = { { Text = "Cancel" }, { Text = "Send", Primary = true, Callback = function(body)
-            body = tostring(body or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-            body = Trim(body)
-            if body == "" then return end
-            local lang = Trim(langBox and langBox.Text or ""):gsub("[^%w_%+%-%.#]", "")
-            local msg = "```" .. lang .. "\n" .. body .. "\n```"
-            if #msg > 1500 then
-                Lib:Notify({ Title = "Code block", Text = "That's too long to send (max about 1500 characters).", Type = "error" })
-                return
-            end
-            self:Send(msg)
-        end } } })
-end
-
 -- ==================== G) the + button in the input bar ====================
-function Chat:_PlusMenu(anchor)
-    self:_PopMenu({ Sections = { {
-        { Text = "Code Block...", Icon = "code", Cb = function() self:CodeComposer() end },
-        { Text = "Share My Server", Icon = "gamepad-2", Cb = function() self:ShareServer() end },
-        { Text = "Search Images", Icon = "image", Cb = function() self:PickSearch() end },
-    } } }, anchor)
-end
-
 function Chat:_InitBar()
     local input = self.Input
     local bar = input.Parent
@@ -15489,7 +15453,7 @@ function Chat:_RenderSegments(item, meta)
         if not ok then warn("[Aether] leading code block: " .. tostring(err)) end
 end
 
--- ---------- 2) watermark + keybind list hidden in the main UI's fullscreen ----------
+-- ---------- 2) watermark hidden in the main UI's fullscreen ----------
 Lib:Connect(RunService.Heartbeat, function()
         local w = Lib.MainWindow
         local fs = w and w.Fullscreen
@@ -15497,10 +15461,6 @@ Lib:Connect(RunService.Heartbeat, function()
         if wm and wm.Frame and wm.Frame.Parent then
                 local want = (wm.Enabled ~= false) and not fs
                 if wm.Frame.Visible ~= want then wm.Frame.Visible = want end
-        end
-        local kl = Lib.KeybindList
-        if kl and kl.Frame and kl.Frame.Parent and fs and kl.Frame.Visible then
-                kl.Frame.Visible = false
         end
 end)
 
