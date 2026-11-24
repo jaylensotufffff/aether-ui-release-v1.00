@@ -17392,5 +17392,1100 @@ end
 end
 -- ===================== end patch 6.3 =====================
 
+-- ===================== Aether patch 6.4 =====================
+do
+local P = {}
+Lib.Version = "6.4.0"
+
+-- ==================== 1) member since = first run ====================
+do
+    local since
+    local function Path() return Lib.ConfigFolder .. "/firstrun.txt" end
+    function Lib:GetSince()
+        if since then return since end
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if isfile(p) then since = tonumber(Trim(readfile(p))) end
+            end)
+        end
+        if not since then
+            since = os.time()
+            if FsOk() then
+                pcall(function()
+                    if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                    writefile(Path(), tostring(since))
+                end)
+            end
+        end
+        return since
+    end
+    function Lib:SinceText(t)
+        t = tonumber(t) or self:GetSince()
+        if t > 1e11 then t = t / 1000 end
+        local ok, s = pcall(os.date, "%B %d, %Y", math.floor(t))
+        return ok and s or "Unknown"
+    end
+end
+
+-- tell the relay too (it just ignores the parameter if it doesn't use it)
+P.Do = Chat._Do
+function Chat:_Do(path, query, method, body, room)
+    query = query or {}
+    query.since = tostring(Lib:GetSince())
+    return P.Do(self, path, query, method, body, room)
+end
+
+-- ==================== 2) game thumbnails ====================
+do
+    local info, waiters = {}, {}
+    function Lib:GameInfo(place, cb)
+        place = tonumber(place)
+        if not place then Safe(cb, "Unknown game", nil) return end
+        local c = info[place]
+        if c then Safe(cb, c.name, c.icon) return end
+        if waiters[place] then table.insert(waiters[place], cb) return end
+        waiters[place] = { cb }
+        task.spawn(function()
+            local ok, r = pcall(function() return Market:GetProductInfo(place) end)
+            local name = (ok and r and r.Name) and tostring(r.Name) or "a Roblox game"
+            local icon
+            local aid = ok and r and tonumber(r.IconImageAssetId)
+            if aid and aid > 0 then icon = "rbxthumb://type=Asset&id=" .. aid .. "&w=150&h=150" end
+            if not icon then
+                local uni = (place == game.PlaceId) and game.GameId or nil
+                if not uni or uni == 0 then
+                    local body = Fetch("https://apis.roblox.com/universes/v1/places/" .. place .. "/universe")
+                    local okd, d = pcall(function() return HttpService:JSONDecode(body or "") end)
+                    uni = okd and type(d) == "table" and tonumber(d.universeId) or nil
+                end
+                if uni and uni > 0 then icon = "rbxthumb://type=GameIcon&id=" .. uni .. "&w=150&h=150" end
+            end
+            info[place] = { name = name, icon = icon }
+            local w = waiters[place]
+            waiters[place] = nil
+            for _, f in ipairs(w or {}) do Safe(f, name, icon) end
+        end)
+    end
+end
+
+local function Thumb(parent, size, pos, place, z, anchor)
+    local img = New("ImageLabel", { Name = "GameThumb", Size = UDim2.fromOffset(size, size), Position = pos, AnchorPoint = anchor or Vector2.new(0, 0),
+        BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, ZIndex = z or 1, Theme = { BackgroundColor3 = "Field" }, Parent = parent })
+    Corner(img, 6)
+    Lib:GameInfo(place, function(_, icon) if img.Parent and icon then img.Image = icon end end)
+    return img
+end
+
+-- the "Playing" bar under a DM header
+P.PaintPresence = Chat._PaintPresence
+function Chat:_PaintPresence()
+    P.PaintPresence(self)
+    pcall(function()
+        local bar, p = self._presBar, self._pres
+        if not (bar and p) then return end
+        if not (self._presThumb and self._presThumb.Parent) then
+            self._presThumb = New("ImageLabel", { Name = "GameThumb", Size = UDim2.fromOffset(36, 36), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0),
+                BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, ZIndex = 2, Theme = { BackgroundColor3 = "Bg" }, Parent = bar })
+            Corner(self._presThumb, 6)
+            self._presThumbPlace = nil
+            for _, c in ipairs(bar:GetChildren()) do
+                if c:IsA("TextLabel") then
+                    c.Position = UDim2.fromOffset(58, c.Position.Y.Offset)
+                    if c ~= self._presGame and c ~= self._presSub then
+                        c.Size = UDim2.new(c.Size.X.Scale, c.Size.X.Offset - 42, c.Size.Y.Scale, c.Size.Y.Offset)
+                    end
+                end
+            end
+        end
+        if self._presThumbPlace ~= p.place then
+            self._presThumbPlace = p.place
+            local img, place = self._presThumb, p.place
+            img.Image = ""
+            Lib:GameInfo(place, function(_, icon) if img.Parent and self._presThumbPlace == place and icon then img.Image = icon end end)
+        end
+        for _, l in ipairs({ self._presGame, self._presSub }) do
+            l.Size = UDim2.new(l.Size.X.Scale, l.Size.X.Offset - 42, l.Size.Y.Scale, l.Size.Y.Offset)
+        end
+    end)
+end
+
+-- the "Playing now" cards in the sidebar
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function()
+        if not Lib:LoadExtras().presence then return end
+        local friends = {}
+        for _, u in ipairs(self.Friends.friends) do
+            if self.Friends.online[tostring(u.uid)] then
+                local place, job = tonumber(u.place), u.job and tostring(u.job)
+                if place and place ~= 0 and job and job ~= "" then friends[#friends + 1] = u end
+            end
+        end
+        table.sort(friends, function(a, b) return tostring(a.display or a.name):lower() < tostring(b.display or b.name):lower() end)
+        for _, card in ipairs(sb.list:GetChildren()) do
+            if card.Name == "PresenceCard" and not card:FindFirstChild("GameThumb") then
+                local u = friends[card.LayoutOrder - 5000]
+                if u then
+                    Thumb(card, 28, UDim2.fromOffset(6, 6), u.place, 3)
+                    for _, c in ipairs(card:GetChildren()) do
+                        if c:IsA("TextLabel") then
+                            c.Position = UDim2.fromOffset(c.Position.X.Offset + 34, c.Position.Y.Offset)
+                            c.Size = UDim2.new(c.Size.X.Scale, c.Size.X.Offset - 34, c.Size.Y.Scale, c.Size.Y.Offset)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] presence thumbnails: " .. tostring(err)) end
+end
+
+-- Join Me cards in chat
+P.BuildJoinCard = Chat._BuildJoinCard
+function Chat:_BuildJoinCard(item, meta, msg, c)
+    P.BuildJoinCard(self, item, meta, msg, c)
+    pcall(function()
+        local col = item:FindFirstChild("Col")
+        local bubble = col and col:FindFirstChild("Bubble")
+        local card = bubble and bubble:FindFirstChild("JoinCard")
+        if not (card and c and c.place) or card:FindFirstChild("GameThumb") then return end
+        Thumb(card, 46, UDim2.new(1, -10, 0, 8), c.place, 3, Vector2.new(1, 0))
+        for _, l in ipairs(card:GetChildren()) do
+            if l:IsA("TextLabel") then
+                l.Size = UDim2.new(l.Size.X.Scale, l.Size.X.Offset - 56, l.Size.Y.Scale, l.Size.Y.Offset)
+            end
+        end
+    end)
+end
+
+-- ==================== 3) profile card: Roblox joined + Member since ====================
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    local ok, err = pcall(function()
+        local uid = tonumber(u.uid)
+        if not uid then return end
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c:IsA("TextButton") then dim = c end
+        end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        if not card then return end
+        local age
+        for _, d in ipairs(card:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                if d.Text == "Member since" then d.Text = "Roblox joined"
+                elseif d.Text == "Account age" then age = d end
+            end
+        end
+        if not age then return end
+        local at = age.Parent.LayoutOrder
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("GuiObject") and c.LayoutOrder > at then c.LayoutOrder = c.LayoutOrder + 1 end
+        end
+        local row = New("Frame", { Name = "SinceRow", Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, LayoutOrder = at + 1, ZIndex = 102, Parent = card })
+        New("TextLabel", { Text = "Member since", TextSize = 12, Size = UDim2.new(0.4, 0, 1, 0), TextXAlignment = LEFT, ZIndex = 103, Theme = { TextColor3 = "SubText" }, Parent = row })
+        local val = New("TextLabel", { Text = "...", TextSize = 12, Size = UDim2.new(0.6, 0, 1, 0), Position = UDim2.fromScale(0.4, 0), TextXAlignment = RIGHT, ZIndex = 103,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = row })
+        if uid == LocalPlayer.UserId then
+            val.Text = Lib:SinceText()
+        else
+            task.spawn(function()
+                local d = Decode(self:_Do("/profile", { target = uid }))
+                if not val.Parent then return end
+                local s = d and d.ok and d.user and tonumber(d.user.since)
+                val.Text = s and Lib:SinceText(s) or "Unknown"
+            end)
+        end
+    end)
+    if not ok then warn("[Aether] member since: " .. tostring(err)) end
+end
+
+-- ==================== 4) User Settings screen (replaces 6.3's) ====================
+function Chat:OpenSettings(page)
+    if self._set and self._set.Parent then self._set:Destroy() end
+    local chat = self
+    local root = Sink(New("Frame", { Name = "UserSettings", Size = UDim2.fromScale(1, 1), ZIndex = 500, Theme = { BackgroundColor3 = "Bg" }, Parent = Lib.Gui }))
+    self._set = root
+    local esc
+    local function Close()
+        if esc then esc:Disconnect() esc = nil end
+        if root.Parent then root:Destroy() end
+    end
+    esc = UIS.InputBegan:Connect(function(i)
+        if i.KeyCode == Enum.KeyCode.Escape and not UIS:GetFocusedTextBox() then Close() end
+    end)
+    root.Destroying:Connect(function() if esc then esc:Disconnect() esc = nil end end)
+
+    local vpx = Lib.Gui.AbsoluteSize.X
+    local SW = vpx < 700 and 190 or 250
+    local titles = { account = "My Account", profiles = "Profiles", chat = "Chat", notifs = "Notifications", privacy = "Privacy & Blocking" }
+    local navDef = {
+        { "account", "user", "My Account" }, { "profiles", "image", "Profiles" }, { "chat", "message-square", "Chat" },
+        { "notifs", "bell", "Notifications" }, { "privacy", "shield", "Privacy & Blocking" },
+    }
+    local cur, Show = nil, nil
+
+    local side = New("Frame", { Size = UDim2.new(0, SW, 1, 0), Theme = { BackgroundColor3 = "Surface" }, Parent = root })
+    local sl = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, -64), AutomaticCanvasSize = Y, ScrollBarThickness = 0, Parent = side })
+    List(sl, 2) Pad(sl, 12, 16, 12, 8)
+
+    local headB = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, 54), LayoutOrder = 1, BackgroundTransparency = 1, Parent = sl })
+    local hav = New("ImageLabel", { Size = UDim2.fromOffset(40, 40), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0), BackgroundTransparency = 0,
+        ScaleType = Enum.ScaleType.Crop, Theme = { BackgroundColor3 = "Field" }, Parent = headB })
+    Corner(hav, 20)
+    local art0 = Lib:LoadArt()
+    if art0.pfp then self:_ArtImage(art0.pfp, function(a) if hav.Parent then hav.Image = a end end)
+    else GetAvatar(LocalPlayer.UserId, function(a) if hav.Parent then hav.Image = a end end, "HeadShot", "Size150x150") end
+    local hn = Lib:LoadChatName()
+    if hn == "" then hn = LocalPlayer.DisplayName end
+    New("TextLabel", { Text = hn, Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -56, 0, 18), Position = UDim2.fromOffset(54, 8), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = headB })
+    local ep = New("Frame", { Size = UDim2.new(1, -56, 0, 14), Position = UDim2.fromOffset(54, 28), BackgroundTransparency = 1, Parent = headB })
+    Lib.Icon("pencil", 11, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Parent = ep }, "e")
+    New("TextLabel", { Text = "Edit Profiles", TextSize = 11, Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(14, 0), TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = ep })
+    headB.Activated:Connect(function() Show("profiles") end)
+
+    New("TextLabel", { Text = "User Settings", Font = Lib.FontBold, TextSize = 11, Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 2, TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = sl })
+
+    local navB = {}
+    for i, def in ipairs(navDef) do
+        local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, 36), LayoutOrder = 2 + i, BackgroundTransparency = 1, Theme = { BackgroundColor3 = "FieldHover" }, Parent = sl })
+        Corner(b, 6)
+        local ico = Lib.Icon(def[2], 16, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Parent = b })
+        local lbl = New("TextLabel", { Text = def[3], TextSize = 14, Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(36, 0), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "SubText" }, Parent = b })
+        navB[def[1]] = { b = b, lbl = lbl, ico = ico }
+        b.MouseEnter:Connect(function() if cur ~= def[1] then Tween(b, { BackgroundTransparency = 0.6 }, 0.06) end end)
+        b.MouseLeave:Connect(function() if cur ~= def[1] then Tween(b, { BackgroundTransparency = 1 }, 0.08) end end)
+        b.Activated:Connect(function() Show(def[1]) end)
+    end
+    local function StyleNav()
+        for k, n in pairs(navB) do
+            local on = k == cur
+            n.b.BackgroundTransparency = on and 0.35 or 1
+            n.lbl.TextColor3 = on and Lib.Theme.Text or Lib.Theme.SubText
+            Tint(n.ico, on and Lib.Theme.Text or Lib.Theme.SubText, 0.05)
+        end
+    end
+
+    local foot = New("Frame", { Size = UDim2.new(1, -24, 0, 52), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -8), BackgroundTransparency = 1, Parent = side })
+    List(foot, 6, Enum.FillDirection.Vertical, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Bottom)
+    local function FootBtn(text, order, fn)
+        local b = New("TextButton", { Text = text, TextSize = 12, Size = UDim2.new(1, 0, 0, 24), LayoutOrder = order, BackgroundTransparency = 0,
+            Theme = { BackgroundColor3 = "Field", TextColor3 = "SubText" }, Parent = foot })
+        Corner(b, 5)
+        b.Activated:Connect(fn)
+    end
+    FootBtn("Main menu", 1, function()
+        Close()
+        if chat.Full then chat:SetFullscreen(false) end
+        Lib:SetVisible(true)
+        local w = Lib.MainWindow
+        if w and w.Minimized then w:SetMinimized(false) end
+    end)
+    FootBtn("Close  (Esc)", 2, Close)
+
+    local main = New("Frame", { Size = UDim2.new(1, -SW, 1, 0), Position = UDim2.fromOffset(SW, 0), BackgroundTransparency = 1, Parent = root })
+    local titleL = New("TextLabel", { Text = "", Font = Lib.FontBold, TextSize = 16, Size = UDim2.new(1, -80, 0, 52), Position = UDim2.fromOffset(24, 0), TextXAlignment = LEFT, Parent = main })
+    local x = IconButton(main, "x", "×", 32, "Close (Esc)", "Bad")
+    x.Button.AnchorPoint, x.Button.Position = Vector2.new(1, 0.5), UDim2.new(1, -16, 0, 26)
+    x.Button.Activated:Connect(Close)
+    New("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, 52), BackgroundTransparency = 0.5, Theme = { BackgroundColor3 = "Stroke" }, Parent = main })
+    local scroll = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, -53), Position = UDim2.fromOffset(0, 53), AutomaticCanvasSize = Y, ScrollBarThickness = 3, Parent = main })
+    Pad(scroll, 24, 24, 24, 48)
+    local stack = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0), BackgroundTransparency = 1, Parent = scroll })
+    List(stack, 12)
+    New("UISizeConstraint", { MaxSize = Vector2.new(680, 1e6), Parent = stack })
+
+    local order = 0
+    local function O() order = order + 1 return order end
+    local function Heading(t)
+        New("TextLabel", { Text = t, Font = Lib.FontBold, TextSize = 22, Size = UDim2.new(1, 0, 0, 30), TextXAlignment = LEFT, LayoutOrder = O(), Parent = stack })
+    end
+    local function SubHead(t)
+        New("TextLabel", { Text = t, Font = Lib.FontBold, TextSize = 16, Size = UDim2.new(1, 0, 0, 24), TextXAlignment = LEFT, LayoutOrder = O(), Parent = stack })
+    end
+    local function Note(t)
+        local l = New("TextLabel", { Text = t, TextSize = 12, Size = UDim2.new(1, 0, 0, 16), TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top,
+            LayoutOrder = O(), Theme = { TextColor3 = "Dim" }, Parent = stack })
+        Wrap(l, nil, nil, 16)
+    end
+    local function Card()
+        local c = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, LayoutOrder = O(), Theme = { BackgroundColor3 = "Card" }, Parent = stack })
+        Corner(c, 8) Stroke(c, "Stroke", 1, 0.4) Pad(c, 16, 2, 16, 2) List(c, 0)
+        return c
+    end
+    local function Right(parent)
+        local f = New("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(0, 32), AutomaticSize = X, BackgroundTransparency = 1, Parent = parent })
+        List(f, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+        return f
+    end
+    local function Line(card, label, desc, build)
+        local r = New("Frame", { Size = UDim2.new(1, 0, 0, desc and 56 or 46), BackgroundTransparency = 1, LayoutOrder = O(), Parent = card })
+        New("TextLabel", { Text = label, TextSize = 14, Size = UDim2.new(1, -210, 0, 18), Position = UDim2.fromOffset(0, desc and 10 or 14), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+        if desc then
+            New("TextLabel", { Text = desc, TextSize = 11, Size = UDim2.new(1, -210, 0, 14), Position = UDim2.fromOffset(0, 30), TextXAlignment = LEFT,
+                TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = r })
+        end
+        New("Frame", { Size = UDim2.new(1, 0, 0, 1), AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), BackgroundTransparency = 0.6,
+            Theme = { BackgroundColor3 = "Stroke" }, Parent = r })
+        build(Right(r))
+    end
+    local function Btn(parent, text, fn, o)
+        o = o or {}
+        local b = New("TextButton", { Text = text, TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), BackgroundTransparency = 0,
+            Theme = { BackgroundColor3 = o.primary and "Accent" or "FieldHover", TextColor3 = o.primary and "OnAccent" or (o.danger and "Bad" or "Text") }, Parent = parent })
+        Corner(b, 5) Pad(b, 12, 0, 12, 0)
+        b.Activated:Connect(function() fn(b) end)
+        return b
+    end
+    local function Val(parent, text)
+        New("TextLabel", { Text = tostring(text), TextSize = 13, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), Theme = { TextColor3 = "SubText" }, Parent = parent })
+    end
+    local function Swatch(parent, color)
+        local s = New("Frame", { Size = UDim2.fromOffset(28, 18), BackgroundColor3 = color, Parent = parent })
+        Corner(s, 4) Stroke(s, "Stroke", 1, 0.2)
+    end
+    local function Toggle(parent, get, set)
+        local on = get() and true or false
+        local b = New("TextButton", { Text = "", Size = UDim2.fromOffset(42, 24), BackgroundTransparency = 0, BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Stroke, Parent = parent })
+        Corner(b, 12)
+        local k = New("Frame", { Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, on and 21 or 3, 0.5, 0), BackgroundColor3 = WHITE, Parent = b })
+        Corner(k, 9)
+        b.Activated:Connect(function()
+            on = not on
+            Tween(b, { BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Stroke }, 0.12)
+            Tween(k, { Position = UDim2.new(0, on and 21 or 3, 0.5, 0) }, 0.14)
+            set(on)
+        end)
+    end
+    local function Seg(parent, values, getv, setv)
+        local f = New("Frame", { Size = UDim2.fromOffset(#values * 86, 28), BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field" }, Parent = parent })
+        Corner(f, 6)
+        local btns = {}
+        local function Paint()
+            for v, b in pairs(btns) do
+                local on = v == getv()
+                b.BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Field
+                b.TextColor3 = on and Lib.KnobOn() or Lib.Theme.SubText
+            end
+        end
+        for i, v in ipairs(values) do
+            local b = New("TextButton", { Text = v, TextSize = 12, Size = UDim2.new(1 / #values, -4, 1, -4), Position = UDim2.new((i - 1) / #values, 2, 0, 2), BackgroundTransparency = 0, Parent = f })
+            Corner(b, 5)
+            btns[v] = b
+            b.Activated:Connect(function() setv(v) Paint() end)
+        end
+        Paint()
+    end
+    local function Sync(idx, v) local t = Lib.Toggles[idx] if t then t:SetValue(v, true) end end
+    local function AssetId(t)
+        t = Trim(t)
+        return t:match("^(%d+)$") or t:match("rbxassetid://(%d+)") or t:match("[?&]id=(%d+)")
+    end
+
+    local pages = {}
+
+    pages.account = function()
+        Heading("My Account")
+        chat:_ProfilePreview(stack, O())
+        local c = Card()
+        local nm = Lib:LoadChatName()
+        Line(c, "Chat display name", nm ~= "" and nm or LocalPlayer.DisplayName, function(R)
+            Btn(R, "Edit", function()
+                Lib:Prompt({ Title = "Chat display name", Text = "Shown on your chat messages. Leave empty to use your Roblox display name.", Default = nm,
+                    Placeholder = LocalPlayer.DisplayName, Confirm = "Save" }, function(t)
+                    Lib:SetChatName(t)
+                    task.delay(1.2, function() if root.Parent and cur == "account" then Show("account") end end)
+                end)
+            end)
+        end)
+        local bio = Lib:LoadBio()
+        Line(c, "Bio", bio ~= "" and bio or "No bio yet", function(R)
+            Btn(R, "Edit", function()
+                Lib:Prompt({ Title = "Bio", Text = "Shown on your profile card (up to 120 characters).", Default = bio, Placeholder = "About me", Confirm = "Save" }, function(t)
+                    Lib:SetBio(t)
+                    if root.Parent and cur == "account" then Show("account") end
+                end)
+            end)
+        end)
+        Line(c, "Username", nil, function(R) Val(R, "@" .. LocalPlayer.Name) end)
+        Line(c, "User ID", nil, function(R) Val(R, LocalPlayer.UserId) Btn(R, "Copy", function() Copy(tostring(LocalPlayer.UserId), "User ID") end) end)
+        Line(c, "Account age", nil, function(R) Val(R, LocalPlayer.AccountAge .. " days") end)
+        Line(c, "Member since", "The first time you ran this script", function(R) Val(R, Lib:SinceText()) end)
+    end
+
+    pages.profiles = function()
+        Heading("Profiles")
+        Note("Your profile picture is your Roblox avatar by default. Replace it, or the banner, with any picture.")
+        chat:_ProfilePreview(stack, O())
+        local c = Card()
+        local art = Lib:LoadArt()
+        local function Redo() if root.Parent and cur == "profiles" then Show("profiles") end end
+        Line(c, "Profile picture", art.pfp and "Custom picture" or "Using your Roblox avatar", function(R)
+            Btn(R, "Change", function(b) chat:ChooseArt("pfp", b, Redo) end, { primary = true })
+            if art.pfp then Btn(R, "Remove", function() Lib:SetArt("pfp", nil) Redo() end, { danger = true }) end
+        end)
+        Line(c, "Banner", art.banner and "Custom banner" or "Using your accent color", function(R)
+            Btn(R, "Change", function(b) chat:ChooseArt("banner", b, Redo) end, { primary = true })
+            if art.banner then Btn(R, "Remove", function() Lib:SetArt("banner", nil) Redo() end, { danger = true }) end
+        end)
+        Note("Pictures are saved on this device. Other people only see them if your chat server stores profile art.")
+    end
+
+    pages.chat = function()
+        Heading("Chat")
+        local sk, S, prefs = Lib:LoadSkin(), Lib:LoadChatState(), Lib:LoadChatPrefs()
+        local c = Card()
+        Line(c, "Message style", nil, function(R)
+            Seg(R, { "Discord", "Bubbles" }, function() return sk.MsgStyle end, function(v)
+                sk.MsgStyle = v Lib:SaveSkin() Sync("ChatMsgStyle", v)
+                pcall(function() chat:_ReloadMessages() end)
+            end)
+        end)
+        Line(c, "Layout", nil, function(R)
+            Seg(R, { "Discord", "Compact" }, function() return S.layout end, function(v)
+                S.layout = v Lib:SaveChatState() Sync("ChatLayout", v)
+                pcall(function() chat:_ApplyLayout() end)
+            end)
+        end)
+        Line(c, "Keep chat open when the main menu closes", nil, function(R)
+            Toggle(R, function() return sk.Independent end, function(v) sk.Independent = v Lib:SaveSkin() Sync("ChatIndependent", v) Lib:SetVisible(Lib.Visible) end)
+        end)
+        Line(c, "Link previews", nil, function(R)
+            Toggle(R, function() return Lib.LinkPreviews ~= false end, function(v) Lib.LinkPreviews = v end)
+        end)
+        Line(c, "Load images automatically", nil, function(R)
+            Toggle(R, function() return Lib.ShowImages ~= false end, function(v) Lib.ShowImages = v end)
+        end)
+        Line(c, "Double-tap reaction", "Double-tap or double-click a message", function(R)
+            New("TextLabel", { Text = prefs.DoubleTap, TextSize = 20, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), Parent = R })
+            Btn(R, "Change", function()
+                chat:EmojiPicker(function(e) prefs.DoubleTap = e Lib:SaveChatPrefs() Sync("DoubleTapReact", e) if root.Parent and cur == "chat" then Show("chat") end end, "Double-tap reaction")
+            end)
+        end)
+
+        SubHead("Background")
+        local bc = Card()
+        Line(bc, "Chat background", sk.ChatBg ~= "" and "Custom image" or "Default", function(R)
+            Btn(R, "Change", function()
+                Lib:Prompt({ Title = "Chat background", Text = "Paste an Image asset id (a number or rbxassetid://...).", Placeholder = "123456789", Confirm = "Apply" }, function(t)
+                    local n = AssetId(t)
+                    if not n then Lib:Notify({ Title = "Background", Text = "That doesn't look like an asset id.", Type = "error" }) return end
+                    sk.ChatBg = "rbxassetid://" .. n
+                    Lib:SaveSkin()
+                    pcall(function() Lib:ApplyChatBg() end)
+                    if root.Parent and cur == "chat" then Show("chat") end
+                end)
+            end, { primary = true })
+            if sk.ChatBg ~= "" then
+                Btn(R, "Remove", function()
+                    sk.ChatBg = ""
+                    Lib:SaveSkin()
+                    pcall(function() Lib:ApplyChatBg() end)
+                    if root.Parent and cur == "chat" then Show("chat") end
+                end, { danger = true })
+            end
+        end)
+        Line(bc, "Background strength", nil, function(R)
+            Seg(R, { "Subtle", "Medium", "Strong" }, function()
+                if sk.ChatBgT <= 0.35 then return "Subtle" elseif sk.ChatBgT >= 0.65 then return "Strong" end
+                return "Medium"
+            end, function(v)
+                sk.ChatBgT = v == "Subtle" and 0.25 or (v == "Strong" and 0.8 or 0.5)
+                Lib:SaveSkin()
+                pcall(function() Lib:ApplyChatBg() end)
+            end)
+        end)
+
+        SubHead("Name style")
+        Lib:LoadNameStyle()
+        local ns = Lib.NameStyle
+        local function NS() Lib:SaveNameStyle() if root.Parent and cur == "chat" then Show("chat") end end
+        local nc = Card()
+        Line(nc, "Preview", nil, function(R)
+            local st = Lib:ParseStyle(Lib:EncodeStyle(true))
+            New("TextLabel", { RichText = true, Text = (st and Lib:RenderName(LocalPlayer.DisplayName, st) or RichEsc(LocalPlayer.DisplayName))
+                .. " <font color='#" .. ToHex(Lib.Theme.Dim) .. "'>12:34</font>", TextSize = 15, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), Parent = R })
+        end)
+        Line(nc, "Use a custom name style", "Other chat users see it on your messages", function(R)
+            Toggle(R, function() return ns.On end, function(v) ns.On = v NS() end)
+        end)
+        local function HexPrompt(title, key)
+            Lib:Prompt({ Title = title, Text = "Hex color, like #8B5CF6", Default = ToHex(ns[key]), Placeholder = "8B5CF6", Confirm = "Apply" }, function(t)
+                local col = FromHex(t)
+                if not col then Lib:Notify({ Title = "Name style", Text = "That isn't a valid hex color.", Type = "error" }) return end
+                ns[key] = col
+                NS()
+            end)
+        end
+        Line(nc, "Name color", "#" .. ToHex(ns.C1), function(R) Swatch(R, ns.C1) Btn(R, "Edit", function() HexPrompt("Name color", "C1") end) end)
+        Line(nc, "Gradient", "Blend into a second color", function(R)
+            Toggle(R, function() return ns.Grad end, function(v) ns.Grad = v NS() end)
+        end)
+        if ns.Grad then
+            Line(nc, "Second color", "#" .. ToHex(ns.C2), function(R) Swatch(R, ns.C2) Btn(R, "Edit", function() HexPrompt("Second color", "C2") end) end)
+        end
+        Line(nc, "Font", nil, function(R)
+            Val(R, ns.Font)
+            Btn(R, "Change", function(b)
+                local items = {}
+                for _, f in ipairs(Lib.FontValues or { "Default" }) do
+                    items[#items + 1] = { Text = (f == ns.Font and "• " or "   ") .. f, Callback = function() ns.Font = f NS() end }
+                end
+                chat:Menu(items, b)
+            end)
+        end)
+    end
+
+    pages.notifs = function()
+        Heading("Notifications")
+        local c = Card()
+        local prefs, ex = Lib:LoadChatPrefs(), Lib:LoadExtras()
+        Line(c, "Popup notifications", "Mentions, friend requests and announcements", function(R)
+            Toggle(R, function() return Lib.NotifyEnabled ~= false end, function(v) Lib.NotifyEnabled = v Sync("NotifyOn", v) end)
+        end)
+        Line(c, "Read receipts (DMs)", "Show Read under your last DM, and let them see yours", function(R)
+            Toggle(R, function() return prefs.ReadReceipts end, function(v)
+                prefs.ReadReceipts = v Lib:SaveChatPrefs() Sync("ReadReceipts", v)
+                if not v then chat.ReadMark = nil end
+                pcall(function() chat:_PlaceRead() end)
+            end)
+        end)
+        Line(c, "Presence cards", "Show what game a friend is in, with a Join button", function(R)
+            Toggle(R, function() return ex.presence end, function(v)
+                ex.presence = v Lib:SaveExtras() Sync("PresenceCards", v)
+                pcall(function() chat:_UpdatePresence(true) end)
+                chat:_QueueSidebar()
+            end)
+        end)
+        Note("To mute a single chat: open its menu (the chevron in the chat header) > Notification Settings, or type /mute in a DM or group.")
+    end
+
+    pages.privacy = function()
+        Heading("Privacy & Blocking")
+        local c = Card()
+        Line(c, "Share my game in chat", "Lets people see your game and join your server", function(R)
+            Toggle(R, function() return Lib.ShareServer ~= false end, function(v) Lib.ShareServer = v Sync("ShareServer", v) end)
+        end)
+        SubHead("Blocked users")
+        local names = {}
+        for uid, nm in pairs(Lib.BlockList) do names[#names + 1] = { uid = uid, name = tostring(nm) } end
+        table.sort(names, function(a, b) return a.name:lower() < b.name:lower() end)
+        if #names == 0 then
+            Note("Nobody is blocked.")
+            return
+        end
+        local bc = Card()
+        for _, e in ipairs(names) do
+            Line(bc, e.name, "User ID " .. e.uid, function(R)
+                Btn(R, "Unblock", function()
+                    Lib:Unblock(e.uid)
+                    if root.Parent and cur == "privacy" then Show("privacy") end
+                end)
+            end)
+        end
+    end
+
+    Show = function(key)
+        if not pages[key] then key = "account" end
+        local same = key == cur
+        local y = scroll.CanvasPosition
+        cur = key
+        for _, c in ipairs(stack:GetChildren()) do
+            if not c:IsA("UIListLayout") and not c:IsA("UISizeConstraint") then c:Destroy() end
+        end
+        order = 0
+        titleL.Text = titles[key]
+        StyleNav()
+        local ok, err = pcall(pages[key])
+        if not ok then warn("[Aether] settings page: " .. tostring(err)) end
+        task.defer(function() if scroll.Parent then scroll.CanvasPosition = same and y or Vector2.zero end end)
+    end
+    if page == "appearance" then page = "chat" end
+    Show(page or "account")
+end
+
+-- ==================== 5) main menu: chat settings removed, avatar, accents ====================
+function Lib:_RefreshMainAvatar()
+    local w = self.MainWindow
+    local av = w and w.Avatar
+    if not (av and av.Parent) or w.NameHidden then return end
+    av.ScaleType = Enum.ScaleType.Crop
+    local e = self:LoadArt().pfp
+    local key = e and (e.asset or e.id) or "default"
+    w._avKey = key
+    local function Set(a) if av.Parent and w._avKey == key and not w.NameHidden then av.Image = a end end
+    if e then
+        if e.asset then Set(e.asset)
+        elseif self.ChatObj then self.ChatObj:_ArtImage(e, Set) end
+    else
+        GetAvatar(LocalPlayer.UserId, Set)
+    end
+end
+
+P.SetArt = Lib.SetArt
+function Lib:SetArt(kind, entry)
+    P.SetArt(self, kind, entry)
+    if kind == "pfp" then pcall(function() self:_RefreshMainAvatar() end) end
+end
+
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p64 then
+        tab._p64 = true
+        pcall(function()
+            for _, sub in ipairs(tab.Subs) do
+                for _, gb in ipairs(sub.Groupboxes) do
+                    if gb.Name == "Chat" or gb.Name == "Chat name style" then
+                        gb:SetVisible(false)
+                        gb.Entries = {}
+                    end
+                end
+            end
+            local t = Lib.Toggles.ShareServer
+            if t and t.Row then
+                t.Row.Visible = false
+                for _, sub in ipairs(tab.Subs) do
+                    for _, gb in ipairs(sub.Groupboxes) do
+                        for i = #gb.Entries, 1, -1 do if gb.Entries[i].obj == t then table.remove(gb.Entries, i) end end
+                    end
+                end
+            end
+        end)
+    end
+    return tab
+end
+
+P.AddGroupbox = SubTab.AddGroupbox
+function SubTab:AddGroupbox(name, side, opts)
+    local box = P.AddGroupbox(self, name, side, opts)
+    pcall(function()
+        local head = box.Frame:FindFirstChild("Head")
+        if head then
+            local bar = New("Frame", { Name = "AccentMark", Size = UDim2.fromOffset(3, 12), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+                Theme = { BackgroundColor3 = "Accent" }, Parent = head })
+            Corner(bar, 2)
+        end
+    end)
+    return box
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p64 then
+        chat._p64 = true
+        Lib:GetSince() -- records the first run
+        task.delay(1, function() if not Lib.Unloaded then pcall(function() Lib:_RefreshMainAvatar() end) end end)
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 6.4 =====================
+
+-- ===================== Aether patch 6.5 =====================
+do
+local P = {}
+Lib.Version = "6.5.0"
+
+local function H32(s)
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    return string.format("%08x", h)
+end
+
+local function AssetId(t)
+    t = Trim(tostring(t or ""))
+    return t:match("^(%d+)$") or t:match("rbxassetid://(%d+)") or t:match("[?&]id=(%d+)")
+end
+
+-- a Decal id doesn't render in an ImageLabel; its Texture does. Falls back to the id you gave.
+local function ImageId(n)
+    local ok, objs = pcall(function() return game:GetObjects("rbxassetid://" .. n) end)
+    if ok and type(objs) == "table" and objs[1] then
+        local o = objs[1]
+        local tex
+        pcall(function()
+            if o:IsA("Decal") or o:IsA("Texture") then tex = o.Texture
+            elseif o:IsA("ImageLabel") or o:IsA("ImageButton") then tex = o.Image end
+        end)
+        pcall(function() o:Destroy() end)
+        if tex then
+            local id = tostring(tex):match("id=(%d+)") or tostring(tex):match("(%d+)$")
+            if id then return id end
+        end
+    end
+    return n
+end
+
+-- ==================== 1) your custom picture on your chat messages ====================
+local Want = setmetatable({}, { __mode = "k" })
+
+local function Lock(av)
+    if av:GetAttribute("p65lock") then return end
+    av:SetAttribute("p65lock", true)
+    -- the original headshot loads asynchronously and would overwrite ours, so ours is re-applied
+    av:GetPropertyChangedSignal("Image"):Connect(function()
+        local w = Want[av]
+        if w and av.Image ~= w then av.Image = w end
+    end)
+end
+
+function Chat:_ApplyMyArt(item)
+    local av = item and item:FindFirstChild("Avatar")
+    if not (av and av:IsA("ImageButton")) or not av.Active then return end -- only the first message of a group shows an avatar
+    local e = Lib:LoadArt().pfp
+    if e then
+        Lock(av)
+        av.ScaleType = Enum.ScaleType.Crop
+        self:_ArtImage(e, function(a)
+            if av.Parent then Want[av] = a av.Image = a end
+        end)
+    elseif Want[av] then
+        Want[av] = nil
+        GetAvatar(LocalPlayer.UserId, function(u) if av.Parent then av.Image = u end end)
+    end
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local last = self.Items[#self.Items]
+    local res = P.AddMessage(self, msg)
+    local item = self.Items[#self.Items]
+    if item and item ~= last and type(msg) == "table" and tostring(msg.uid) == tostring(LocalPlayer.UserId) then
+        pcall(self._ApplyMyArt, self, item)
+    end
+    return res
+end
+
+P.SetArt = Lib.SetArt
+function Lib:SetArt(kind, entry)
+    P.SetArt(self, kind, entry)
+    local c = self.ChatObj
+    if kind == "pfp" and c then
+        for _, it in ipairs(c.Items) do
+            if it:GetAttribute("uid") == tostring(LocalPlayer.UserId) then pcall(c._ApplyMyArt, c, it) end
+        end
+    end
+end
+
+-- ==================== 2) picture / banner menu: search, asset id, reset ====================
+function Chat:ChooseArt(kind, anchor, after)
+    local label = kind == "pfp" and "profile picture" or "banner"
+    local items = {
+        { Text = "Search images...", Callback = function()
+            self._artPick = { kind = kind, after = after, shown = false }
+            Lib:Notify({ Title = "Profile", Text = "Search for a picture, then tap it to use it as your " .. label .. ".", Type = "info", Duration = 4 })
+            self:PickSearch()
+        end },
+        { Text = "Use an asset id...", Callback = function()
+            Lib:Prompt({ Title = "Asset id", Text = "Paste an Image or Decal asset id (a number or rbxassetid://...).", Placeholder = "123456789", Confirm = "Use" }, function(t)
+                local n = AssetId(t)
+                if not n then Lib:Notify({ Title = "Profile", Text = "That doesn't look like an asset id.", Type = "error" }) return end
+                Lib:Notify({ Title = "Profile", Text = "Checking asset...", Type = "info", Duration = 2 })
+                task.spawn(function()
+                    Lib:SetArt(kind, { asset = "rbxassetid://" .. ImageId(n) })
+                    Lib:Notify({ Title = "Profile", Text = "Your " .. label .. " was updated.", Type = "success", Duration = 2.5 })
+                    if after then Safe(after) end
+                end)
+            end)
+        end },
+    }
+    if Lib:LoadArt()[kind] then
+        table.insert(items, { Text = "Reset to default", Danger = true, Callback = function()
+            Lib:SetArt(kind, nil)
+            if after then Safe(after) end
+        end })
+    end
+    self:Menu(items, anchor)
+end
+
+-- ==================== 3) backgrounds: search + asset id ====================
+local function Resolve(s, cb)
+    s = Trim(s or "")
+    if s == "" then return false end
+    if s:sub(1, 5) == "file:" then
+        local p = s:sub(6)
+        local ok, ex = pcall(isfile, p)
+        if ok and ex then
+            local a = CustomAsset(p)
+            if a then cb(a) return true end
+        end
+        return false
+    end
+    local n = s:match("^(%d+)$") or s:match("rbxassetid://(%d+)") or s:match("[?&]id=(%d+)") or s:match("/(%d+)")
+    if n then cb("rbxassetid://" .. n) return true end
+    if s:find("^rbxasset") then cb(s) return true end
+    return false
+end
+
+local function BgLabel(frame, radius)
+    local img = New("ImageLabel", { Name = "CustomBG", Size = UDim2.fromScale(1, 1), ZIndex = 0, ScaleType = Enum.ScaleType.Crop, Visible = false, Parent = frame })
+    Corner(img, radius)
+    return img
+end
+
+function Lib:ApplyUiBg()
+    local w = self.MainWindow
+    if not (w and w.Main and w.Main.Parent) then return end
+    local sk = self.Skin
+    if not (w._bg and w._bg.Parent) then w._bg = BgLabel(w.Main, w.Fullscreen and 0 or 8) end
+    local img = w._bg
+    img.Visible = Resolve(sk.UiBg, function(a)
+        img.Image = a
+        img.ImageTransparency = 1 - Clamp(sk.UiBgT, 0.05, 1)
+    end)
+end
+
+function Lib:ApplyChatBg()
+    local c = self.ChatObj
+    if not (c and c.Frame and c.Frame.Parent) then return end
+    local sk = self.Skin
+    if not (c._bg and c._bg.Parent) then c._bg = BgLabel(c.Frame, c.Full and 0 or 8) end
+    local img = c._bg
+    local on = Resolve(sk.ChatBg, function(a)
+        img.Image = a
+        img.ImageTransparency = 1 - Clamp(sk.ChatBgT, 0.05, 1)
+    end)
+    img.Visible = on
+    c.List.BackgroundTransparency = on and 0.45 or 0
+    if c._sb then c._sb.card.BackgroundTransparency = on and 0.45 or 0 end
+end
+
+function Lib:SetBg(target, value)
+    local sk = self:LoadSkin()
+    if target == "chat" then sk.ChatBg = value else sk.UiBg = value end
+    self:SaveSkin()
+    if target == "chat" then
+        pcall(self.ApplyChatBg, self)
+    else
+        pcall(self.ApplyUiBg, self)
+        if value ~= "" then pcall(self._BgGlass, self) end
+        pcall(function() local o = Lib.Options.__UiBgId if o then o:SetValue(value:find("^file:") and "" or value, true) end end)
+    end
+end
+
+-- downloads a search result into <Folder>/cache and returns the file path (png / jpg / bmp only)
+function Chat:_FetchBg(payload, cb)
+    task.spawn(function()
+        local tried = {}
+        local function Try(u)
+            if type(u) ~= "string" or u == "" or tried[u] then return nil end
+            tried[u] = true
+            local body = Fetch(u)
+            local ext = body and ThumbExt(body)
+            if not ext and self.Request and self.Config.Url then
+                local res = self:_Do("/thumb", { u = u })
+                if res and res.StatusCode == 200 and type(res.Body) == "string" and #res.Body > 64 and res.Body:sub(1, 1) ~= "{" then
+                    body = res.Body
+                    ext = ThumbExt(body)
+                end
+            end
+            if not ext then return nil end
+            CachePath("x", "image/png") -- makes sure the cache folder exists
+            local path = Lib.ConfigFolder .. "/cache/bg_" .. H32(u) .. ext
+            if pcall(writefile, path, body) then return path end
+        end
+        cb(Try(payload.url) or Try(payload.fallback))
+    end)
+end
+
+function Chat:BgSearch(target, after)
+    if not (FsOk() and (getcustomasset or getsynasset)) then
+        Lib:Notify({ Title = "Background", Text = "Your executor can't load image files. Use an asset id instead.", Type = "warn", Duration = 5 })
+        return
+    end
+    if not (self.Alive and self.Request) then
+        Lib:Notify({ Title = "Background", Text = "Image search needs the chat to be connected.", Type = "warn", Duration = 4 })
+        return
+    end
+    self._bgPick = { target = target, after = after, shown = false }
+    Lib:Notify({ Title = "Background", Text = "Search for a picture, then tap it to use it.", Type = "info", Duration = 4 })
+    self:PickSearch()
+end
+
+function Chat:ChooseBg(target, anchor, after)
+    local title = target == "chat" and "Chat" or "Menu"
+    local items = {
+        { Text = "Search images...", Callback = function() self:BgSearch(target, after) end },
+        { Text = "Use an asset id...", Callback = function()
+            Lib:Prompt({ Title = title .. " background", Text = "Paste an Image or Decal asset id (a number or rbxassetid://...).", Placeholder = "123456789", Confirm = "Apply" }, function(t)
+                local n = AssetId(t)
+                if not n then Lib:Notify({ Title = "Background", Text = "That doesn't look like an asset id.", Type = "error" }) return end
+                task.spawn(function()
+                    Lib:SetBg(target, "rbxassetid://" .. ImageId(n))
+                    Lib:Notify({ Title = "Background", Text = title .. " background applied.", Type = "success", Duration = 2.5 })
+                    if after then Safe(after) end
+                end)
+            end)
+        end },
+    }
+    local cur = target == "chat" and Lib.Skin.ChatBg or Lib.Skin.UiBg
+    if cur ~= "" then
+        table.insert(items, { Text = "Reset to default", Danger = true, Callback = function()
+            Lib:SetBg(target, "")
+            if after then Safe(after) end
+        end })
+    end
+    self:Menu(items, anchor)
+end
+
+-- same "pick one from the search window" trick the profile art uses
+P.PickSearch = Chat.PickSearch
+function Chat:PickSearch()
+    local pk = self._bgPick
+    if pk and pk.started then self._bgPick = nil end -- stale pick from a cancelled search
+    if self._bgPick then self._bgPick.started = true end
+    return P.PickSearch(self)
+end
+
+P.ShowResults = Chat.ShowResults
+function Chat:ShowResults(q)
+    local pk = self._bgPick
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowResults(self, q)
+    if not pk then return end
+    pk.shown = true
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do
+        if not before[c] and c:IsA("TextButton") then
+            c.Destroying:Connect(function()
+                task.delay(0.5, function() if self._bgPick == pk then self._bgPick = nil end end)
+            end)
+        end
+    end
+end
+
+P.SendImage = Chat.SendImage
+function Chat:SendImage(payload)
+    local pk = self._bgPick
+    if pk then
+        self._bgPick = nil
+        if pk.shown then
+            Lib:Notify({ Title = "Background", Text = "Downloading...", Type = "info", Duration = 2 })
+            self:_FetchBg(payload, function(path)
+                if not path then
+                    Lib:Notify({ Title = "Background", Text = "Couldn't download that image (it may be a format Roblox can't show). Try another.", Type = "error", Duration = 5 })
+                    return
+                end
+                Lib:SetBg(pk.target, "file:" .. path)
+                Lib:Notify({ Title = "Background", Text = (pk.target == "chat" and "Chat" or "Menu") .. " background applied.", Type = "success", Duration = 2.5 })
+                if pk.after then Safe(pk.after) end
+            end)
+            return
+        end
+    end
+    return P.SendImage(self, payload)
+end
+
+-- ==================== 4) User Settings: use the new menus on Change ====================
+local Targets = { ["Profile picture"] = "pfp", ["Banner"] = "banner", ["Chat background"] = "chat" }
+
+function Chat:_PatchSettingsButtons(root)
+    local chat = self
+    local function Fix(b)
+        if not (b:IsA("TextButton") and b.Text == "Change") or b:GetAttribute("p65") then return end
+        local R = b.Parent
+        local line = R and R.Parent
+        local lbl = line and line:FindFirstChildWhichIsA("TextLabel")
+        local kind = lbl and Targets[lbl.Text]
+        if not kind then return end
+        b:SetAttribute("p65", true)
+        b.Visible = false
+        local nb = New("TextButton", { Text = "Change", TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), BackgroundTransparency = 0, LayoutOrder = -1,
+            Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = R })
+        Corner(nb, 5) Pad(nb, 12, 0, 12, 0)
+        nb.Activated:Connect(function()
+            if kind == "chat" then chat:ChooseBg("chat", nb, function() chat:OpenSettings("chat") end)
+            else chat:ChooseArt(kind, nb, function() chat:OpenSettings("profiles") end) end
+        end)
+    end
+    for _, d in ipairs(root:GetDescendants()) do Fix(d) end
+    root.DescendantAdded:Connect(function(d) task.defer(function() Fix(d) end) end)
+end
+
+P.OpenSettings = Chat.OpenSettings
+function Chat:OpenSettings(page)
+    P.OpenSettings(self, page)
+    local root = self._set
+    if root and root.Parent and not root:GetAttribute("p65") then
+        root:SetAttribute("p65", true)
+        pcall(self._PatchSettingsButtons, self, root)
+    end
+end
+
+-- ==================== 5) avatar no longer hidden behind the banner ====================
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    pcall(function()
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c:IsA("TextButton") then dim = c end
+        end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        if not card then return end
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("Frame") then
+                if c.Name == "Banner" then c.ZIndex = 102
+                elseif c.LayoutOrder == 1 then c.ZIndex = 110 end -- the avatar row sits above the banner
+            end
+        end
+    end)
+end
+
+P.ProfilePreview = Chat._ProfilePreview
+function Chat:_ProfilePreview(parent, order)
+    local card = P.ProfilePreview(self, parent, order)
+    pcall(function()
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("ImageLabel") and c.Size == UDim2.fromOffset(76, 76) then c.ZIndex = 10
+            elseif c:IsA("Frame") and c.Position == UDim2.fromOffset(8, 8) then c.ZIndex = 1 end
+        end
+    end)
+    return card
+end
+
+-- ==================== 6) hub menu: search button for the menu background ====================
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p65 then
+        tab._p65 = true
+        pcall(function()
+            for _, sub in ipairs(tab.Subs) do
+                for _, gb in ipairs(sub.Groupboxes) do
+                    if gb.Name == "Backgrounds" then
+                        gb:AddButton({ Text = "Search images for the menu background", Icon = "search", Func = function()
+                            local c = Lib.ChatObj
+                            if not c then Lib:Notify({ Text = "Image search needs the chat.", Type = "warn" }) return end
+                            c:BgSearch("ui")
+                        end })
+                    end
+                end
+            end
+        end)
+    end
+    return tab
+end
+
+end
+-- ===================== end patch 6.5 =====================
+
 
 return Lib
