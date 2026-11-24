@@ -1,4 +1,3 @@
-
 --// AETHER UI - FULL EXAMPLE
 --// UI demonstration using the Aether library
 
@@ -13,8 +12,6 @@ local Window = Lib:CreateWindow({
     Folder = "Aether",
     Version = "1.0.0",
     EnvKey = "__AetherUI",
-    ChannelsKey = "AetherChannels",
-    ChatUrl = "https://aether-chat.j6n7.workers.dev",
 })
 
 --// MAIN TAB
@@ -395,9 +392,6 @@ Lib:BuildSettingsTab(Window)
 Lib:CreateWatermark()
 Lib:CreateKeybindList()
 
---// add channels
-
- 
 --// LOAD CONFIG
 
 Lib:LoadAutoload()
