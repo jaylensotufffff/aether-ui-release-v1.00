@@ -397,14 +397,7 @@ Lib:CreateKeybindList()
 
 --// add channels
 
- Lib:CreateChat({
-    Url = "https://aether-chat.j6n7.workers.dev",
-   Channels = {
-         ["Blox Fruits"] = 2753915549,
-        ["Arsenal"] = 286090429,
-   }
- })
-
+ 
 --// LOAD CONFIG
 
 Lib:LoadAutoload()
