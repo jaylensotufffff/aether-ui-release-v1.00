@@ -13741,7 +13741,7 @@ end
 
 function Chat:CodeComposer()
         local langBox
-        Lib:Dialog({ Title = "Send code block", Text = "Paste or type your code (up to " .. CODE_MAX .. " characters). People can copy it, nothing runs automatically.",
+        Lib:Dialog({ Title = "Share code", Text = "Paste or type your code (up to " .. CODE_MAX .. " characters). People can copy it, nothing runs automatically.",
                 Extra = function(card)
                         local lf = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = 3, ZIndex = 102, Theme = { BackgroundColor3 = "Field" }, Parent = card })
                         Corner(lf, 5) Stroke(lf, "Stroke", 1, 0.3)
@@ -13760,7 +13760,7 @@ function Chat:CodeComposer()
                         local lang = Trim(langBox and langBox.Text or ""):gsub("[^%w_%+%-%.#]", "")
                         local msg = "```" .. lang .. "\n" .. body .. "\n```"
                         if #msg > CODE_MAX then
-                                Lib:Notify({ Title = "Code block", Text = "That's too long to send (max " .. CODE_MAX .. " characters).", Type = "error" })
+                                Lib:Notify({ Title = "Share code", Text = "That's too long to send (max " .. CODE_MAX .. " characters).", Type = "error" })
                                 return
                         end
                         self:Send(msg)
@@ -13792,7 +13792,7 @@ end
 
 function Chat:_PlusMenu(anchor)
         self:_PopMenu({ Sections = { {
-                { Text = "Code Block...", Icon = "code", Cb = function() self:CodeComposer() end },
+                { Text = "Share Code...", Icon = "code", Cb = function() self:CodeComposer() end },
                 { Text = "Share My Server", Icon = "gamepad-2", Cb = function() self:ShareServer() end },
                 { Text = "Share Config...", Icon = "share-2", Cb = function() self:ConfigShareMenu(anchor) end },
         } } }, anchor)
@@ -14543,7 +14543,7 @@ Def("poll", "/poll Question | A | B | C", "Start a poll (2 to 10 options). Just 
     local q = table.remove(parts, 1)
     c:CreatePoll(q, parts)
 end)
-Def("code", "/code", "Open the code block composer.", function(c) c:CodeComposer() end)
+Def("code", "/code", "Open the share code composer.", function(c) c:CodeComposer() end)
 Def("join", "/join", "Share your current server as a Join card.", function(c) c:ShareServer() end)
 Def("mute", "/mute", "Mute this chat (no badges or popups).", function(c)
     local ch = c.Channels[c.ChIndex]
@@ -15063,5 +15063,448 @@ end
 
 end
 -- ===================== end patch 5.6 =====================
+
+-- ===================== Aether patch 5.7 =====================
+do
+local P = {}
+Lib.Version = "5.7.0"
+local LEFTA = Enum.HorizontalAlignment.Left
+
+Lib.Skin = { MsgStyle = "Discord", Independent = true, UiBg = "", UiBgT = 0.5, ChatBg = "", ChatBgT = 0.5 }
+
+-- ---------- saved skin ----------
+do
+        local loaded, tick = false, 0
+        local function Path() return Lib.ConfigFolder .. "/skin.json" end
+        function Lib:LoadSkin()
+                if loaded then return self.Skin end
+                loaded = true
+                if FsOk() then
+                        pcall(function()
+                                local p = Path()
+                                if not isfile(p) then return end
+                                local d = HttpService:JSONDecode(readfile(p))
+                                if type(d) ~= "table" then return end
+                                local s = self.Skin
+                                if d.msg == "Bubbles" or d.msg == "Discord" then s.MsgStyle = d.msg end
+                                if type(d.ind) == "boolean" then s.Independent = d.ind end
+                                if type(d.ui) == "string" then s.UiBg = d.ui:sub(1, 120) end
+                                if type(d.chat) == "string" then s.ChatBg = d.chat:sub(1, 120) end
+                                if tonumber(d.uit) then s.UiBgT = Clamp(tonumber(d.uit), 0.05, 1) end
+                                if tonumber(d.cht) then s.ChatBgT = Clamp(tonumber(d.cht), 0.05, 1) end
+                        end)
+                end
+                return self.Skin
+        end
+        function Lib:SaveSkin()
+                if not FsOk() then return end
+                tick = tick + 1
+                local t = tick
+                task.delay(0.6, function()
+                        if t ~= tick then return end
+                        pcall(function()
+                                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                                local s = Lib.Skin
+                                writefile(Path(), HttpService:JSONEncode({ msg = s.MsgStyle, ind = s.Independent, ui = s.UiBg, chat = s.ChatBg, uit = s.UiBgT, cht = s.ChatBgT }))
+                        end)
+                end)
+        end
+end
+
+local function IsFlat() return Lib.Skin.MsgStyle ~= "Bubbles" end
+
+-- ---------- custom backgrounds ----------
+local function BgAsset(s)
+        s = Trim(s or "")
+        if s == "" then return nil end
+        local n = s:match("^(%d+)$") or s:match("rbxassetid://(%d+)") or s:match("[?&]id=(%d+)") or s:match("/(%d+)")
+        if n then return "rbxassetid://" .. n end
+        if s:find("^rbxasset") then return s end
+        return nil
+end
+
+local function MakeBg(parent, radius)
+        local img = New("ImageLabel", { Name = "CustomBG", Size = UDim2.fromScale(1, 1), ZIndex = 0, ScaleType = Enum.ScaleType.Crop, Visible = false, Parent = parent })
+        Corner(img, radius)
+        return img
+end
+
+function Lib:ApplyUiBg()
+        local w = self.MainWindow
+        if not (w and w.Main and w.Main.Parent) then return end
+        local sk = self.Skin
+        local a = BgAsset(sk.UiBg)
+        if not (w._bg and w._bg.Parent) then w._bg = MakeBg(w.Main, w.Fullscreen and 0 or 8) end
+        w._bg.Visible = a ~= nil
+        if a then
+                w._bg.Image = a
+                w._bg.ImageTransparency = 1 - Clamp(sk.UiBgT, 0.05, 1)
+        end
+end
+
+function Lib:ApplyChatBg()
+        local c = self.ChatObj
+        if not (c and c.Frame and c.Frame.Parent) then return end
+        local sk = self.Skin
+        local a = BgAsset(sk.ChatBg)
+        if not (c._bg and c._bg.Parent) then c._bg = MakeBg(c.Frame, c.Full and 0 or 8) end
+        c._bg.Visible = a ~= nil
+        if a then
+                c._bg.Image = a
+                c._bg.ImageTransparency = 1 - Clamp(sk.ChatBgT, 0.05, 1)
+        end
+        c.List.BackgroundTransparency = a and 0.45 or 0
+        if c._sb then c._sb.card.BackgroundTransparency = a and 0.45 or 0 end
+end
+
+function Lib:_BgGlass()
+        if self.GlassT < 0.3 then
+                local o = self.Options.WinOpacity
+                if o then o:SetValue(40) else self:SetGlass(0.4) end
+        end
+end
+
+P.Corners = Window._Corners
+function Window:_Corners(r)
+        P.Corners(self, r)
+        local c = self._bg and self._bg:FindFirstChildOfClass("UICorner")
+        if c then c.CornerRadius = UDim.new(0, r) end
+end
+
+P.ChatFs = Chat.SetFullscreen
+function Chat:SetFullscreen(s)
+        P.ChatFs(self, s)
+        local c = self._bg and self._bg:FindFirstChildOfClass("UICorner")
+        if c then c.CornerRadius = UDim.new(0, self.Full and 0 or 8) end
+end
+
+P.BuildBuiltins = Window.BuildBuiltins
+function Window:BuildBuiltins()
+        P.BuildBuiltins(self)
+        Lib:LoadSkin()
+        pcall(function() Lib:ApplyUiBg() end)
+        pcall(function() Lib:ApplyChatBg() end)
+end
+
+-- ---------- panels stay open when the menu closes ----------
+P.NewPanel = Lib._NewPanel
+function Lib:_NewPanel(name, frame, startShown)
+        local p = P.NewPanel(self, name, frame, startShown)
+        function p:Refresh(instant)
+                local win = Lib.MainWindow
+                local hiddenByMin = self.Side and not self.Moved and win and win.Minimized
+                local gate = Lib.Visible
+                if name ~= "Window" and Lib.Skin.Independent then gate = true end
+                local want = (gate and self.Enabled and not hiddenByMin) and true or false
+                if want == self._shown then return end
+                self._shown = want
+                self._gen = self._gen + 1
+                local gen, base, fr, scale = self._gen, Lib.Scale, self.Frame, self.Scale
+                if instant then fr.Visible = want scale.Scale = base return end
+                if want then
+                        fr.Visible = true
+                        scale.Scale = base * 0.96
+                        Tween(scale, { Scale = base }, 0.2, Enum.EasingStyle.Quint)
+                else
+                        Tween(scale, { Scale = base * 0.97 }, 0.12)
+                        task.delay(0.13, function() if self._gen == gen then fr.Visible = false scale.Scale = Lib.Scale end end)
+                end
+        end
+        return p
+end
+
+-- ---------- mobile button hidden in fullscreen ----------
+Lib:Connect(RunService.Heartbeat, function()
+        local b = Lib.MobileButton
+        if not b then return end
+        local w, c = Lib.MainWindow, Lib.ChatObj
+        local full = (w and w.Fullscreen) or (c and c.Full and c.PanelObj and c.PanelObj._shown)
+        local want = not full
+        if b.Visible ~= want then b.Visible = want end
+end)
+
+-- ---------- Discord-style messages ----------
+local function EmojiOnly(t)
+        t = Trim(t)
+        if t == "" or #t > 96 then return false end
+        local ok, n = pcall(function()
+                local c = 0
+                for _, cp in utf8.codes(t) do
+                        if cp == 32 or cp == 0x200D or cp == 0xFE0F or cp == 0x20E3 then
+                        elseif (cp >= 0x1F000 and cp <= 0x1FAFF) or (cp >= 0x2190 and cp <= 0x2BFF) or cp == 0x203C or cp == 0x2049 then c = c + 1
+                        else return -1 end
+                end
+                return c
+        end)
+        return ok and n >= 1 and n <= 12
+end
+
+function Chat:_FlatFix(item)
+        if not (item and item.Parent) then return end
+        local meta = self.Meta[item]
+        if not (meta and meta.flat) then return end
+        local col = item:FindFirstChild("Col")
+        if not col then return end
+        col.Size = UDim2.new(1, -36, 0, 0)
+        local bubble = col:FindFirstChild("Bubble")
+        if bubble then bubble.Size = UDim2.new(1, 0, 0, 0) end
+end
+
+function Chat:_FlatStyle(item, msg)
+        local meta = self.Meta[item]
+        if not meta or meta.flat then return end
+        meta.flat = true
+        local lay = item:FindFirstChildOfClass("UIListLayout")
+        if lay then lay.HorizontalAlignment = LEFTA end
+        local av = item:FindFirstChild("Avatar")
+        if av then av.LayoutOrder = 1 end
+        local col = item:FindFirstChild("Col")
+        if not col then return end
+        local cl = col:FindFirstChildOfClass("UIListLayout")
+        if cl then cl.HorizontalAlignment = LEFTA end
+        local reacts = col:FindFirstChild("Reacts")
+        local rl = reacts and reacts:FindFirstChildOfClass("UIListLayout")
+        if rl then rl.HorizontalAlignment = LEFTA end
+        local head = col:FindFirstChildOfClass("TextLabel")
+        if head then
+                head.TextXAlignment = LEFT
+                local mine = tostring(msg.uid) == tostring(LocalPlayer.UserId)
+                local t = head.Text
+                if mine and not t:find("<b>", 1, true) and not t:find("face=", 1, true) then
+                        local nm = tostring((msg.display ~= nil and msg.display ~= "") and msg.display or msg.name or "Unknown")
+                        local tm = ""
+                        if type(msg.ts) == "number" then pcall(function() tm = os.date("%H:%M", math.floor(msg.ts / 1000)) end) end
+                        head.Text = "<b><font color='#" .. Hex("Text") .. "'>" .. RichEsc(nm) .. "</font></b> <font color='#" .. Hex("Dim") .. "'>" .. tm .. "</font>"
+                end
+        end
+        local bubble = col:FindFirstChild("Bubble")
+        if bubble then
+                local pad = bubble:FindFirstChildOfClass("UIPadding")
+                if pad then
+                        pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 4), UDim.new(0, 4)
+                        pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 2), UDim.new(0, 2)
+                end
+                if (bubble:GetAttribute("rest") or 0) == 0 then
+                        -- invisible until hovered (a gradient so the library's own hover tween can't undo it)
+                        local g = Instance.new("UIGradient")
+                        g.Transparency = NumberSequence.new(1)
+                        g.Parent = bubble
+                        local st = bubble:FindFirstChildOfClass("UIStroke")
+                        if st then st:Destroy() end
+                        item.MouseEnter:Connect(function() g.Transparency = NumberSequence.new(0.82) end)
+                        item.MouseLeave:Connect(function() g.Transparency = NumberSequence.new(1) end)
+                end
+        end
+        self:_FlatFix(item)
+end
+
+function Chat:_DayDivider(item, msg)
+        if type(msg.ts) ~= "number" then return end
+        local sec = math.floor(msg.ts / 1000)
+        local day = os.date("%Y-%m-%d", sec)
+        if self._day == day then return end
+        self._day = day
+        local label
+        if day == os.date("%Y-%m-%d") then label = "Today"
+        elseif day == os.date("%Y-%m-%d", os.time() - 86400) then label = "Yesterday"
+        else label = os.date("%B %d, %Y", sec) end
+        self.Counter = self.Counter + 1
+        local div = New("Frame", { Name = "DayDivider", Size = UDim2.new(1, 0, 0, H(24)), BackgroundTransparency = 1, LayoutOrder = item.LayoutOrder, Parent = self.List })
+        item.LayoutOrder = self.Counter
+        New("Frame", { Size = UDim2.new(1, -8, 0, 1), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0), BackgroundTransparency = 0.5,
+                Theme = { BackgroundColor3 = "Stroke" }, Parent = div })
+        local pill = New("TextLabel", { Text = label, Font = Lib.FontBold, TextSize = 10, AutomaticSize = X, Size = UDim2.fromOffset(0, 16), AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 0, Theme = { TextColor3 = "SubText", BackgroundColor3 = "Surface" }, Parent = div })
+        Corner(pill, 8) Pad(pill, 8, 0, 8, 0)
+        table.insert(self.Items, #self.Items, div)
+end
+
+for _, nm in ipairs({ "_RefitBubble", "_StyleHead", "_RenderReactions", "_ClampItem", "_WidenItem" }) do
+        local orig = Chat[nm]
+        if orig then
+                Chat[nm] = function(self, item, ...)
+                        local r = orig(self, item, ...)
+                        pcall(self._FlatFix, self, item)
+                        return r
+                end
+        end
+end
+
+P.PlaceRead = Chat._PlaceRead
+function Chat:_PlaceRead()
+        P.PlaceRead(self)
+        if self._seenLbl and IsFlat() then self._seenLbl.TextXAlignment = LEFT end
+end
+
+P.ClearAll = Chat._ClearAll
+function Chat:_ClearAll()
+        self._day = nil
+        return P.ClearAll(self)
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+        local last = self.Items[#self.Items]
+        local res = P.AddMessage(self, msg)
+        local item = self.Items[#self.Items]
+        local meta = item and item ~= last and self.Meta[item]
+        if meta and meta.msg == msg and IsFlat() then
+                local ok, err = pcall(function()
+                        self:_FlatStyle(item, msg)
+                        self:_DayDivider(item, msg)
+                        if not meta.isCard and not meta.txt:find("```", 1, true) and EmojiOnly(meta.txt) then meta.body.TextSize = 30 end
+                end)
+                if not ok then warn("[Aether] discord style: " .. tostring(err)) end
+        end
+        return res
+end
+
+-- Up in an empty box edits your last message, Esc cancels a reply
+function Chat:_InitDiscordKeys()
+        local input = self.Input
+        Lib:Connect(UIS.InputBegan, function(i)
+                if not input:IsFocused() then return end
+                if i.KeyCode == Enum.KeyCode.Up and input.Text == "" then
+                        for k = #self.Items, 1, -1 do
+                                local m = self.Meta[self.Items[k]]
+                                if m and m.msg and m.msg.id and not m.isCard and tostring(m.msg.uid) == tostring(LocalPlayer.UserId) then
+                                        self:EditMessage(m.msg)
+                                        return
+                                end
+                        end
+                elseif i.KeyCode == Enum.KeyCode.Escape and self.ReplyTo then
+                        self:SetReply(nil)
+                end
+        end)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        local chat = P.CreateChat(self, cfg)
+        if chat and not chat._p57 then
+                chat._p57 = true
+                Lib:LoadSkin()
+                pcall(function() chat:_InitDiscordKeys() end)
+                pcall(function() Lib:ApplyChatBg() end)
+        end
+        return chat
+end
+
+-- ---------- settings ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+        local tab = P.BuildSettingsTab(self, window)
+        if tab and not tab._p57 then
+                tab._p57 = true
+                pcall(function()
+                        local sk = Lib:LoadSkin()
+                        local sub = tab.Subs[1]
+                        local function Box(name, side, icon)
+                                for _, g in ipairs(sub.Groupboxes) do if g.Name == name then return g end end
+                                return sub:AddGroupbox(name, side, { Icon = icon, Collapsible = true })
+                        end
+                        local function BgControls(gb, key, tkey, title, id, apply, glass)
+                                gb:AddInput("__" .. id .. "BgId", { Text = title .. " background (asset id)", Placeholder = "123456789 or rbxassetid://123456789",
+                                        Default = sk[key], IgnoreConfig = true, MaxLength = 120 })
+                                gb:AddSlider("__" .. id .. "BgT", { Text = title .. " background visibility", Min = 5, Max = 100, Default = math.floor(sk[tkey] * 100 + 0.5),
+                                        Suffix = "%", IgnoreConfig = true, Callback = function(v) sk[tkey] = v / 100 Lib:SaveSkin() apply() end })
+                                gb:AddButtonRow({
+                                        { Text = "Apply", Func = function()
+                                                local raw = Trim(Lib.Options["__" .. id .. "BgId"].Value or "")
+                                                if not BgAsset(raw) then
+                                                        Lib:Notify({ Title = "Background", Text = "That doesn't look like an asset id.", Type = "error" })
+                                                        return
+                                                end
+                                                sk[key] = raw
+                                                Lib:SaveSkin()
+                                                apply()
+                                                if glass then Lib:_BgGlass() end
+                                                Lib:Notify({ Title = "Background", Text = title .. " background applied.", Type = "success", Duration = 2.5 })
+                                        end },
+                                        { Text = "Default", Func = function()
+                                                sk[key] = ""
+                                                Lib:SaveSkin()
+                                                apply()
+                                                Lib.Options["__" .. id .. "BgId"]:SetValue("", true)
+                                                Lib:Notify({ Title = "Background", Text = title .. " background reset to default.", Type = "success", Duration = 2.5 })
+                                        end },
+                                })
+                        end
+                        local bg = Box("Backgrounds", "Left", "image")
+                        bg:AddLabel("Use an Image asset id. The menu's UI transparency is raised to 40% on Apply so the image can show.")
+                        BgControls(bg, "UiBg", "UiBgT", "Menu", "Ui", function() Lib:ApplyUiBg() end, true)
+
+                        local cg = Box("Chat", "Right", "message-square")
+                        cg:AddDropdown("ChatMsgStyle", { Text = "Message style", Values = { "Discord", "Bubbles" }, Default = sk.MsgStyle, IgnoreConfig = true,
+                                Callback = function(v)
+                                        sk.MsgStyle = v == "Bubbles" and "Bubbles" or "Discord"
+                                        Lib:SaveSkin()
+                                        local c = Lib.ChatObj
+                                        if c then c:_ReloadMessages() end
+                                end })
+                        cg:AddToggle("ChatIndependent", { Text = "Keep chat & ESP open when menu closes", Default = sk.Independent, IgnoreConfig = true,
+                                Callback = function(v)
+                                        sk.Independent = v and true or false
+                                        Lib:SaveSkin()
+                                        Lib:SetVisible(Lib.Visible)
+                                end })
+                        BgControls(cg, "ChatBg", "ChatBgT", "Chat", "Chat", function() Lib:ApplyChatBg() end, false)
+                end)
+        end
+        return tab
+end
+
+end
+-- ===================== end patch 5.7 =====================
+
+-- ===================== Aether patch 5.8 =====================
+do
+local P = {}
+Lib.Version = "5.8.0"
+
+-- ---------- 1) code block at the start of a message ----------
+P.RenderSegments = Chat._RenderSegments
+function Chat:_RenderSegments(item, meta)
+        P.RenderSegments(self, item, meta)
+        if meta.isCard then return end
+        local ok, err = pcall(function()
+                local txt = tostring(meta.txt or "")
+                local a, b = txt:find("^%s*```")
+                if not a then return end
+                local c = txt:find("```", b + 1, true)
+                if not c then return end
+                local col = item:FindFirstChild("Col")
+                local bubble = col and col:FindFirstChild("Bubble")
+                if not bubble then return end
+                local body = txt:sub(b + 1, c - 1)
+                local lang, code = body:match("^([%w_%+%-%.#]*)\n(.*)$")
+                if not lang then lang, code = "", body end
+                code = code:gsub("^\n+", ""):gsub("[\n%s]+$", "")
+                if code == "" then return end
+                meta.extras = meta.extras or {}
+                -- order 10 = before every later segment (those start at 11)
+                table.insert(meta.extras, self:_CodeBlock(bubble, { lang = lang, s = code }, 10))
+                self:_WidenItem(item)
+        end)
+        if not ok then warn("[Aether] leading code block: " .. tostring(err)) end
+end
+
+-- ---------- 2) watermark + keybind list hidden in the main UI's fullscreen ----------
+Lib:Connect(RunService.Heartbeat, function()
+        local w = Lib.MainWindow
+        local fs = w and w.Fullscreen
+        local wm = Lib.Watermark
+        if wm and wm.Frame and wm.Frame.Parent then
+                local want = (wm.Enabled ~= false) and not fs
+                if wm.Frame.Visible ~= want then wm.Frame.Visible = want end
+        end
+        local kl = Lib.KeybindList
+        if kl and kl.Frame and kl.Frame.Parent and fs and kl.Frame.Visible then
+                kl.Frame.Visible = false
+        end
+end)
+
+end
+-- ===================== end patch 5.8 =====================
 
 return Lib
