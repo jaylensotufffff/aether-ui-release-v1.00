@@ -13979,4 +13979,1089 @@ end
 end
 -- ===================== end patch 5.4 =====================
 
+-- ===================== Aether patch 5.5 =====================
+-- Paste right above the final `return Lib` (after patch 5.4).
+--
+--  1) Per-game chat channels are gone. The chat has Global + DMs + groups.
+--     Lib:CreateChat({ Channels = ... }), ChannelsKey and getgenv().<Name>Channels are ignored.
+--  2) The chat server address is built in. ChatUrl / Url from a script are ignored.
+--  3) Profile cards show which hub the person is using (the Title the script owner gave CreateWindow),
+--     e.g. "Using  Aether v1.0.0". Two different hubs that are both called "Aether" are told apart
+--     with a short id: the card shows "Aether v1.0.0 (another hub #3fa9)".
+--
+-- Needs worker.js v2.5.1 (stores hub / hid / hv and returns them from /profile).
+do
+local P = {}
+Lib.Version = "5.5.0"
+
+-- the chat server. Not configurable from a script any more.
+local CHAT_URL = "https://aether-chat.j6n7.workers.dev"
+Lib.DefaultChatUrl = CHAT_URL
+
+-- ---------- hub identity ----------
+local function HubHash(s)
+        local h = 5381
+        for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+        return string.format("%08x", h):sub(1, 6)
+end
+
+local function CleanName(s)
+        s = tostring(s or ""):gsub("%c", " ")
+        s = s:gsub("%s+", " ")
+        return Trim(s):sub(1, 24)
+end
+
+Lib.Hub = { Name = "Aether", Id = HubHash("Aether"), Version = "" }
+
+P.CreateWindow = Lib.CreateWindow
+function Lib:CreateWindow(cfg)
+        cfg = cfg or {}
+        cfg.ChatUrl, cfg.ChannelsKey = nil, nil -- removed options
+        local win = P.CreateWindow(self, cfg)
+        self.DefaultChatUrl = CHAT_URL
+        local name = CleanName(cfg.Title)
+        if name == "" then name = "Aether" end
+        -- the id is what tells two hubs with the same name apart. Set HubId yourself to pin it down,
+        -- otherwise it is made from Title + EnvKey + Folder.
+        local id = (tostring(cfg.HubId or ""):gsub("[^%w]", "")):sub(1, 12)
+        if id == "" then id = HubHash(name .. "|" .. tostring(cfg.EnvKey or "") .. "|" .. tostring(cfg.Folder or name)) end
+        self.Hub = { Name = name, Id = id, Version = (tostring(cfg.Version or ""):gsub("[^%w%.%-_]", "")):sub(1, 12) }
+        return win
+end
+
+-- ---------- chat: no channel config, fixed server, hub info on every request ----------
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        cfg = cfg or {}
+        cfg.Url = CHAT_URL
+        cfg.Channels = {} -- an empty list means only "Global"
+        return P.CreateChat(self, cfg)
+end
+
+function Chat:AddChannel() end
+function Lib:Channels() return self.ChatObj end
+
+P.Do = Chat._Do
+function Chat:_Do(path, query, method, body, room)
+        self.Config.Url = CHAT_URL
+        query = query or {}
+        local h = Lib.Hub
+        query.hub, query.hid, query.hv = h.Name, h.Id, h.Version
+        return P.Do(self, path, query, method, body, room)
+end
+
+-- ---------- profile card: "Using <hub>" ----------
+local function HubText(hub, hid, hv)
+        hub = tostring(hub or "")
+        if hub == "" then return "Unknown" end
+        local t = hub
+        hv = tostring(hv or "")
+        if hv ~= "" then t = t .. " v" .. (hv:gsub("^[vV]", "")) end
+        local mine = Lib.Hub
+        hid = tostring(hid or "")
+        if hid ~= "" and hub:lower() == mine.Name:lower() and hid ~= mine.Id then
+                t = t .. " (another hub #" .. hid:sub(1, 4) .. ")"
+        end
+        return t
+end
+
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+        local before = {}
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+        P.ShowProfile(self, u)
+        local ok, err = pcall(function()
+                local uid = tonumber(u.uid)
+                if not uid then return end
+                local dim
+                for _, c in ipairs(Lib.Overlay:GetChildren()) do
+                        if not before[c] and c:IsA("TextButton") then dim = c end
+                end
+                local card = dim and dim:FindFirstChildWhichIsA("Frame")
+                if not card then return end
+                -- slot a row in right under the header: shift everything below it down by one
+                for _, c in ipairs(card:GetChildren()) do
+                        if c:IsA("GuiObject") and c.LayoutOrder >= 2 then c.LayoutOrder = c.LayoutOrder + 1 end
+                end
+                local row = New("Frame", { Name = "HubRow", Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, LayoutOrder = 2, ZIndex = 102, Parent = card })
+                New("TextLabel", { Text = "Using", TextSize = 12, Size = UDim2.new(0.3, 0, 1, 0), TextXAlignment = LEFT, ZIndex = 103,
+                        Theme = { TextColor3 = "SubText" }, Parent = row })
+                local val = New("TextLabel", { Text = "...", Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(0.7, 0, 1, 0), Position = UDim2.fromScale(0.3, 0),
+                        TextXAlignment = RIGHT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 103, Theme = { TextColor3 = "Accent" }, Parent = row })
+                if uid == LocalPlayer.UserId then
+                        local h = Lib.Hub
+                        val.Text = HubText(h.Name, h.Id, h.Version)
+                        return
+                end
+                task.spawn(function()
+                        local d = Decode(self:_Do("/profile", { target = uid }))
+                        if not val.Parent then return end
+                        if d and d.ok and d.user then val.Text = HubText(d.user.hub, d.user.hid, d.user.hv)
+                        else val.Text = "Unknown" end
+                end)
+        end)
+        if not ok then warn("[Aether] hub row: " .. tostring(err)) end
+end
+
+end
+-- ===================== end patch 5.5 =====================
+
+-- ===================== Aether patch 5.6 (ratings, presence, slash commands, polls) =====================
+do
+local P = {}
+Lib.Version = "5.6.0"
+
+-- ==================== 0) small prefs ====================
+Lib.Extras = { presence = true }
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/chatextras.json" end
+    function Lib:LoadExtras()
+        if loaded then return self.Extras end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) == "table" and type(d.presence) == "boolean" then self.Extras.presence = d.presence end
+            end)
+        end
+        return self.Extras
+    end
+    function Lib:SaveExtras()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.6, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                writefile(Path(), HttpService:JSONEncode({ presence = Lib.Extras.presence }))
+            end)
+        end)
+    end
+end
+
+-- poll / rating votes are reactions, keep them out of the "recent emoji" list
+P.PushRecent = Lib.PushRecentEmoji
+function Lib:PushRecentEmoji(e)
+    if Lib._noRecent then return end
+    return P.PushRecent(self, e)
+end
+local function Silent(fn)
+    Lib._noRecent = true
+    pcall(fn)
+    Lib._noRecent = false
+end
+
+local function Private(chat)
+    local r = chat.Room
+    return type(r) == "string" and (r:sub(1, 3) == "dm:" or r:sub(1, 4) == "grp:")
+end
+
+local function Mine(entry)
+    for _, u in ipairs(entry.u or {}) do if tonumber(u) == LocalPlayer.UserId then return true end end
+    return false
+end
+
+local function Tally(rx, emoji)
+    for _, r in ipairs(rx or {}) do
+        if r.e == emoji then return #(r.u or {}), Mine(r) end
+    end
+    return 0, false
+end
+
+local function CleanPart(s, n)
+    s = tostring(s or "")
+    s = s:gsub("[|%[%]%c]", " ")
+    s = Trim(s)
+    s = s:gsub("%s+", " ")
+    local len = utf8.len(s)
+    if len and len > n then s = s:sub(1, utf8.offset(s, n + 1) - 1) elseif not len then s = s:sub(1, n) end
+    return s
+end
+
+-- ==================== 1) RATINGS (👍 / 👎 on config cards and code messages) ====================
+local UP, DOWN = "👍", "👎"
+
+function Chat:_AddRating(item, meta)
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if not bubble or meta.rateRow then return end
+    meta.isRated = true
+    local msg = meta.msg
+    local what = msg.cfg and "config" or "script"
+    local row = New("Frame", { Name = "RateRow", Size = UDim2.new(1, 0, 0, H(24)), LayoutOrder = 500, BackgroundTransparency = 1, Parent = bubble })
+    List(row, 5, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+    local function Btn(emoji, order, tip)
+        local b = New("TextButton", { Text = "", TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, H(22)), LayoutOrder = order, BackgroundTransparency = 0,
+            Theme = { BackgroundColor3 = "Bg", TextColor3 = "SubText" }, Parent = row })
+        Corner(b, 11) Pad(b, 9, 0, 9, 0)
+        local st = Stroke(b, "Stroke", 1, 0.5)
+        b.Activated:Connect(function() self:RateMessage(msg, emoji) end)
+        Lib:AddTooltip(b, tip)
+        return b, st
+    end
+    local up, upS = Btn(UP, 1, "Works / good " .. what)
+    local dn, dnS = Btn(DOWN, 2, "Broken / bad " .. what)
+    local sum = New("TextLabel", { Text = "", TextSize = 11, AutomaticSize = X, Size = UDim2.fromOffset(0, H(22)), LayoutOrder = 3, TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = row })
+    Pad(sum, 4, 0, 0, 0)
+    meta.rateRow = { row = row, up = up, upS = upS, dn = dn, dnS = dnS, sum = sum, what = what }
+    self:_UpdateRating(item, meta)
+end
+
+function Chat:_UpdateRating(item, meta)
+    local r = meta.rateRow
+    if not (r and r.row.Parent) then return end
+    local u, um = Tally(meta.rx, UP)
+    local d, dm = Tally(meta.rx, DOWN)
+    r.up.Text, r.dn.Text = UP .. " " .. u, DOWN .. " " .. d
+    r.up.TextColor3 = um and Lib.Theme.Text or Lib.Theme.SubText
+    r.dn.TextColor3 = dm and Lib.Theme.Text or Lib.Theme.SubText
+    r.upS.Color, r.upS.Transparency = um and Lib.Theme.Good or Lib.Theme.Stroke, um and 0.05 or 0.5
+    r.dnS.Color, r.dnS.Transparency = dm and Lib.Theme.Bad or Lib.Theme.Stroke, dm and 0.05 or 0.5
+    local total = u + d
+    if total == 0 then
+        r.sum.Text = "Rate this " .. r.what
+    else
+        r.sum.Text = math.floor(u / total * 100 + 0.5) .. "% liked · " .. total .. (total == 1 and " rating" or " ratings")
+    end
+end
+
+function Chat:RateMessage(msg, emoji)
+    if not (msg and msg.id) then return end
+    if tostring(msg.uid) == tostring(LocalPlayer.UserId) then
+        Lib:Notify({ Title = "Rating", Text = "You can't rate your own post.", Type = "warn", Duration = 3 })
+        return
+    end
+    local item = self.ByLid[msg.id]
+    local meta = item and self.Meta[item]
+    local rx = meta and meta.rx or {}
+    local _, upMine = Tally(rx, UP)
+    local _, dnMine = Tally(rx, DOWN)
+    local other = emoji == UP and DOWN or UP
+    local otherMine = emoji == UP and dnMine or upMine
+    if otherMine then
+        Silent(function() self:React(msg.id, other) end)
+        task.delay(0.4, function() Silent(function() self:React(msg.id, emoji) end) end)
+    else
+        Silent(function() self:React(msg.id, emoji) end)
+    end
+end
+
+-- ==================== 2) POLLS (DMs and group chats only) ====================
+local function PollEmoji(i)
+    if i == 10 then return "🔟" end
+    return tostring(i) .. utf8.char(0xFE0F, 0x20E3)
+end
+
+local function ParsePoll(txt)
+    txt = Trim(tostring(txt or ""))
+    local body = txt:match("^%[poll|(.*)%]$")
+    if not body then return nil end
+    local parts = {}
+    for piece in (body .. "|"):gmatch("([^|]*)|") do parts[#parts + 1] = Trim(piece) end
+    local q = table.remove(parts, 1)
+    if not q or q == "" or #parts < 2 or #parts > 10 then return nil end
+    for i, o in ipairs(parts) do
+        if o == "" then return nil end
+        parts[i] = o:sub(1, 60)
+    end
+    return { q = q:sub(1, 140), opts = parts }
+end
+
+function Chat:_BuildPoll(item, meta, msg, poll)
+    meta.isPoll, meta.isCard, meta.poll = true, true, poll
+    meta.body.Visible = false
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if not bubble then return end
+    local card = New("Frame", { Name = "PollCard", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, LayoutOrder = 3, BackgroundTransparency = 0.35,
+        Theme = { BackgroundColor3 = "Bg" }, Parent = bubble })
+    Corner(card, 6) Pad(card, 10, 8, 10, 8) List(card, 5)
+    New("TextLabel", { Text = "POLL", Font = Lib.FontBold, TextSize = 10, Size = UDim2.new(1, 0, 0, 12), TextXAlignment = LEFT, LayoutOrder = 1,
+        Theme = { TextColor3 = "Accent" }, Parent = card })
+    local q = New("TextLabel", { Text = poll.q, Font = Lib.FontBold, TextSize = 13, Size = UDim2.new(1, 0, 0, 16), TextXAlignment = LEFT,
+        TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = 2, Parent = card })
+    Wrap(q, nil, nil, 16)
+    meta.pollRows = {}
+    for i, o in ipairs(poll.opts) do
+        local b = New("TextButton", { Name = "Opt", Text = "", Size = UDim2.new(1, 0, 0, H(28)), LayoutOrder = 2 + i, BackgroundTransparency = 0,
+            ClipsDescendants = true, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+        Corner(b, 5)
+        local fill = New("Frame", { Size = UDim2.fromScale(0, 1), BackgroundTransparency = 0.72, Theme = { BackgroundColor3 = "Accent" }, Parent = b })
+        Corner(fill, 5)
+        New("TextLabel", { Text = o, TextSize = 12, Size = UDim2.new(1, -84, 1, 0), Position = UDim2.fromOffset(10, 0), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 2, Parent = b })
+        local cnt = New("TextLabel", { Text = "0", TextSize = 11, Size = UDim2.fromOffset(72, H(28)), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0),
+            TextXAlignment = RIGHT, ZIndex = 2, Theme = { TextColor3 = "SubText" }, Parent = b })
+        local st = Stroke(b, "Accent", 1, 1)
+        b.Activated:Connect(function() self:VotePoll(msg, poll, i) end)
+        meta.pollRows[i] = { fill = fill, cnt = cnt, st = st }
+    end
+    meta.pollFoot = New("TextLabel", { Text = "", TextSize = 10, Size = UDim2.new(1, 0, 0, 12), LayoutOrder = 100, TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = card })
+    self:_WidenItem(item)
+    self:_UpdatePoll(item, meta)
+end
+
+function Chat:_UpdatePoll(item, meta)
+    if not (meta.isPoll and meta.pollRows) then return end
+    local counts, total, mineIdx = {}, 0, nil
+    for i = 1, #meta.poll.opts do
+        local n, m = Tally(meta.rx, PollEmoji(i))
+        counts[i] = n
+        total = total + n
+        if m then mineIdx = i end
+    end
+    for i, r in ipairs(meta.pollRows) do
+        local pct = total > 0 and counts[i] / total or 0
+        Tween(r.fill, { Size = UDim2.fromScale(pct, 1) }, 0.2)
+        r.cnt.Text = counts[i] .. (total > 0 and (" · " .. math.floor(pct * 100 + 0.5) .. "%") or "")
+        r.st.Transparency = (mineIdx == i) and 0.15 or 1
+    end
+    meta.pollFoot.Text = total .. (total == 1 and " vote" or " votes") .. (mineIdx and " · tap your pick again to undo" or " · tap an option to vote")
+end
+
+function Chat:VotePoll(msg, poll, idx)
+    if not (msg and msg.id) then return end
+    local item = self.ByLid[msg.id]
+    local meta = item and self.Meta[item]
+    local rx = meta and meta.rx or {}
+    local e = PollEmoji(idx)
+    local _, already = Tally(rx, e)
+    local others = {}
+    for i = 1, #poll.opts do
+        if i ~= idx then
+            local _, m = Tally(rx, PollEmoji(i))
+            if m then others[#others + 1] = PollEmoji(i) end
+        end
+    end
+    for _, o in ipairs(others) do Silent(function() self:React(msg.id, o) end) end
+    if already then
+        if #others == 0 then Silent(function() self:React(msg.id, e) end) end
+    elseif #others > 0 then
+        task.delay(0.4, function() Silent(function() self:React(msg.id, e) end) end)
+    else
+        Silent(function() self:React(msg.id, e) end)
+    end
+end
+
+function Chat:_SendRaw(text)
+    if self.Blocked or not self.Request then return end
+    if os.clock() - self.LastSend < 0.8 then self:System("Slow down a little.") return end
+    self.LastSend = os.clock()
+    local replyId = self.ReplyTo and self.ReplyTo.id or nil
+    self:SetReply(nil)
+    self.Stick = true
+    task.spawn(function()
+        local res = self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = text, replyTo = replyId }))
+        local d = Decode(res)
+        if not res or res.StatusCode ~= 200 then self:System((d and d.error) or "Couldn't send.") return end
+        self:_PollOnce()
+    end)
+end
+
+function Chat:CreatePoll(q, opts)
+    if not Private(self) then self:System("Polls only work in DMs and group chats.") return end
+    q = CleanPart(q, 140)
+    local list = {}
+    for _, o in ipairs(opts) do
+        o = CleanPart(o, 60)
+        if o ~= "" then list[#list + 1] = o end
+    end
+    if q == "" then self:System("A poll needs a question.") return end
+    if #list < 2 then self:System("A poll needs at least 2 options.") return end
+    if #list > 10 then self:System("A poll can have at most 10 options.") return end
+    self:_SendRaw("[poll|" .. q .. "|" .. table.concat(list, "|") .. "]")
+end
+
+function Chat:PollComposer()
+    if not Private(self) then self:System("Polls only work in DMs and group chats.") return end
+    local qBox
+    Lib:Dialog({ Title = "Create a poll", Text = "One option per line, 2 to 10 options. Everyone here can vote, one vote each.",
+        Extra = function(card)
+            local qf = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = 3, ZIndex = 102, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+            Corner(qf, 5) Stroke(qf, "Stroke", 1, 0.3)
+            qBox = New("TextBox", { Text = "", PlaceholderText = "Question", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12, Size = UDim2.new(1, -16, 1, 0),
+                Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT, ZIndex = 103, Parent = qf })
+            local f = New("Frame", { Size = UDim2.new(1, 0, 0, 120), LayoutOrder = 3, ZIndex = 102, ClipsDescendants = true, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+            Corner(f, 5) Stroke(f, "Stroke", 1, 0.3)
+            return New("TextBox", { Text = "", PlaceholderText = "Option 1\nOption 2\nOption 3", PlaceholderColor3 = Lib.Theme.Dim, MultiLine = true, TextWrapped = true,
+                TextSize = 12, Size = UDim2.new(1, -16, 1, -12), Position = UDim2.fromOffset(8, 6), TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top,
+                ZIndex = 103, Parent = f })
+        end,
+        Buttons = { { Text = "Cancel" }, { Text = "Post poll", Primary = true, Callback = function(body)
+            local opts = {}
+            for line in (tostring(body or "") .. "\n"):gmatch("([^\n]*)\n") do
+                line = Trim(line)
+                if line ~= "" then opts[#opts + 1] = line end
+            end
+            self:CreatePoll(qBox and qBox.Text or "", opts)
+        end } } })
+end
+
+-- ==================== 3) reactions hook: hide poll / rating chips, refresh the cards ====================
+P.RenderReactions = Chat._RenderReactions
+function Chat:_RenderReactions(item, list)
+    P.RenderReactions(self, item, list)
+    pcall(function()
+        local meta = self.Meta[item]
+        if not meta then return end
+        local col = item:FindFirstChild("Col")
+        local row = col and col:FindFirstChild("Reacts")
+        if meta.isPoll then
+            if row then row.Visible = false end
+            self:_UpdatePoll(item, meta)
+        end
+        if meta.isRated then
+            if row then
+                local left = 0
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("TextButton") then
+                        local t = c.Text
+                        if t:sub(1, #UP) == UP or t:sub(1, #DOWN) == DOWN then c:Destroy() else left = left + 1 end
+                    end
+                end
+                row.Visible = left > 0
+            end
+            self:_UpdateRating(item, meta)
+        end
+    end)
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local last = self.Items[#self.Items]
+    local res = P.AddMessage(self, msg)
+    local item = self.Items[#self.Items]
+    local meta = item and item ~= last and self.Meta[item]
+    if meta and meta.msg == msg and msg.id then
+        local ok, err = pcall(function()
+            local poll = ParsePoll(meta.txt)
+            if poll then
+                if Private(self) then
+                    self:_BuildPoll(item, meta, msg, poll)
+                else
+                    meta.isCard = true
+                    meta.body.Visible = true
+                    meta.body.Text = "📊 Polls only work in DMs and group chats."
+                end
+            elseif msg.cfg or meta.txt:find("```", 1, true) then
+                self:_AddRating(item, meta)
+            end
+            if meta.isPoll or meta.isRated then self:_RenderReactions(item, meta.rx or msg.reactions or {}) end
+        end)
+        if not ok then warn("[Aether] ratings/polls: " .. tostring(err)) end
+    end
+    return res
+end
+
+-- polls can't be edited into something else
+P.MenuItems = Chat._MenuItems
+function Chat:_MenuItems(msg)
+    local groups = P.MenuItems(self, msg)
+    local item = msg and msg.id and self.ByLid[msg.id]
+    local meta = item and self.Meta[item]
+    if meta and (meta.isPoll or ParsePoll(meta.txt)) then
+        for _, g in ipairs(groups) do
+            for i = #g, 1, -1 do if g[i].Text == "Edit Message" then table.remove(g, i) end end
+        end
+    end
+    return groups
+end
+
+-- ==================== 4) SLASH COMMANDS (DMs and group chats only) ====================
+local Cmds, CmdOrder = {}, {}
+local function Def(name, usage, desc, fn, groupOnly)
+    Cmds[name] = { usage = usage, desc = desc, run = fn, group = groupOnly }
+    CmdOrder[#CmdOrder + 1] = name
+end
+local function CurGroup(chat)
+    local ch = chat.Channels[chat.ChIndex]
+    if ch and ch.kind == "grp" then return ch end
+    chat:System("That command only works in group chats.")
+    return nil
+end
+local function Plain(chat, text) return P.Send(chat, text) end
+
+Def("me", "/me <action>", "Send an action, like \"*waves*\".", function(c, a)
+    if a == "" then c:System("Usage: /me <action>") return end
+    Plain(c, "*" .. a .. "*")
+end)
+Def("shrug", "/shrug [text]", "Appends ¯\\_(ツ)_/¯ to your message.", function(c, a)
+    Plain(c, (a ~= "" and (a .. " ") or "") .. "¯\\_(ツ)_/¯")
+end)
+Def("tableflip", "/tableflip [text]", "Appends (╯°□°)╯︵ ┻━┻", function(c, a)
+    Plain(c, (a ~= "" and (a .. " ") or "") .. "(╯°□°)╯︵ ┻━┻")
+end)
+Def("unflip", "/unflip [text]", "Appends ┬─┬ ノ( ゜-゜ノ)", function(c, a)
+    Plain(c, (a ~= "" and (a .. " ") or "") .. "┬─┬ ノ( ゜-゜ノ)")
+end)
+Def("lenny", "/lenny [text]", "Appends ( ͡° ͜ʖ ͡°)", function(c, a)
+    Plain(c, (a ~= "" and (a .. " ") or "") .. "( ͡° ͜ʖ ͡°)")
+end)
+Def("spoiler", "/spoiler <text>", "Hides your message behind a spoiler.", function(c, a)
+    if a == "" then c:System("Usage: /spoiler <text>") return end
+    Plain(c, "||" .. a .. "||")
+end)
+Def("roll", "/roll [NdM]", "Roll dice, e.g. /roll 2d20. Default 1d6.", function(c, a)
+    local n, s = "1", "6"
+    if a ~= "" then
+        n, s = a:match("^(%d*)[dD](%d+)$")
+        if not s then c:System("Usage: /roll 2d20  (up to 20 dice, 1000 sides)") return end
+    end
+    n = Clamp(tonumber(n) or 1, 1, 20)
+    s = Clamp(tonumber(s) or 6, 2, 1000)
+    local rolls, sum = {}, 0
+    for i = 1, n do
+        rolls[i] = math.random(1, s)
+        sum = sum + rolls[i]
+    end
+    Plain(c, "🎲 rolled " .. n .. "d" .. s .. ": " .. (n > 1 and (table.concat(rolls, " + ") .. " = ") or "") .. "**" .. sum .. "**")
+end)
+Def("flip", "/flip", "Flip a coin.", function(c)
+    Plain(c, "🪙 flipped a coin: **" .. (math.random(2) == 1 and "Heads" or "Tails") .. "**")
+end)
+local Ball = { "It is certain.", "Without a doubt.", "Yes, definitely.", "Most likely.", "Signs point to yes.", "Ask again later.",
+    "Cannot predict now.", "Don't count on it.", "My reply is no.", "Very doubtful." }
+Def("8ball", "/8ball <question>", "Ask the magic 8-ball.", function(c, a)
+    if a == "" then c:System("Usage: /8ball <question>") return end
+    Plain(c, "🎱 " .. a .. " → **" .. Ball[math.random(#Ball)] .. "**")
+end)
+Def("nick", "/nick [name]", "Change your chat display name. Empty = your Roblox name.", function(c, a)
+    Lib:SetChatName(a)
+    pcall(function() local o = Lib.Options.__ChatName if o then o:SetValue(a, true) end end)
+    c:System(a == "" and "Using your Roblox display name again." or ("Your chat name is now \"" .. CleanPart(a, 24) .. "\" (applies to new messages)."))
+end)
+Def("poll", "/poll Question | A | B | C", "Start a poll (2 to 10 options). Just /poll opens a form.", function(c, a)
+    if a == "" then c:PollComposer() return end
+    local parts = {}
+    for piece in (a .. "|"):gmatch("([^|]*)|") do parts[#parts + 1] = piece end
+    local q = table.remove(parts, 1)
+    c:CreatePoll(q, parts)
+end)
+Def("code", "/code", "Open the code block composer.", function(c) c:CodeComposer() end)
+Def("join", "/join", "Share your current server as a Join card.", function(c) c:ShareServer() end)
+Def("mute", "/mute", "Mute this chat (no badges or popups).", function(c)
+    local ch = c.Channels[c.ChIndex]
+    Lib:SetNotif(ch.room, "none") ch.unread = 0 c:_RefreshChannel()
+    c:System("Muted. Use /unmute to turn notifications back on.")
+end)
+Def("mentions", "/mentions", "Only notify me about @mentions and replies here.", function(c)
+    local ch = c.Channels[c.ChIndex]
+    Lib:SetNotif(ch.room, "mentions") ch.unread = 0 c:_RefreshChannel()
+    c:System("Only mentions and replies will notify you here.")
+end)
+Def("unmute", "/unmute", "Notify me about every message here again.", function(c)
+    local ch = c.Channels[c.ChIndex]
+    Lib:SetNotif(ch.room, "all") c:_RefreshChannel()
+    c:System("Notifications are back on for this chat.")
+end)
+Def("clear", "/clear", "Clear your view of this chat (nothing is deleted).", function(c)
+    c:_ClearAll()
+    c:System("Cleared your view. Messages come back when you reopen this chat.")
+end)
+Def("search", "/search [text]", "Search messages in this chat.", function(c, a)
+    c:ToggleSearch(true)
+    if a ~= "" then c.SearchBox.Text = a end
+end)
+Def("pins", "/pins", "Show pinned messages.", function(c) c:ShowPins() end)
+Def("dm", "/dm <@user|id>", "Open a DM with someone.", function(c, a)
+    if a == "" then c:System("Usage: /dm @username") return end
+    c:ResolveUser(a, function(u)
+        if not u then Lib:Notify({ Title = "Direct message", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+        if u.uid == LocalPlayer.UserId then Lib:Notify({ Title = "Direct message", Text = "That's you.", Type = "warn" }) return end
+        c:OpenDM(u.uid, u.name, u.display)
+    end)
+end)
+Def("friend", "/friend <@user|id>", "Send a friend request.", function(c, a)
+    if a == "" then c:System("Usage: /friend @username") return end
+    c:ResolveUser(a, function(u)
+        if not u then Lib:Notify({ Title = "Friends", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+        if u.uid == LocalPlayer.UserId then Lib:Notify({ Title = "Friends", Text = "That's you.", Type = "warn" }) return end
+        c:Friend("request", u)
+    end)
+end)
+Def("block", "/block <@user|id>", "Hide someone's messages.", function(c, a)
+    if a == "" then c:System("Usage: /block @username") return end
+    c:ResolveUser(a, function(u)
+        if not u then Lib:Notify({ Title = "Block", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+        Lib:Block(u.uid, u.name)
+    end)
+end)
+Def("unblock", "/unblock <@user|id>", "Unblock someone.", function(c, a)
+    if a == "" then c:System("Usage: /unblock @username") return end
+    c:ResolveUser(a, function(u)
+        if not u then Lib:Notify({ Title = "Block", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+        Lib:Unblock(u.uid)
+        Lib:Notify({ Title = "Block", Text = "Unblocked " .. tostring(u.name) .. ".", Type = "success", Duration = 2.5 })
+    end)
+end)
+Def("invite", "/invite <@user|id>", "Invite someone to this group.", function(c, a)
+    local g = CurGroup(c)
+    if not g then return end
+    if a == "" then c:InviteToGroup(g.gid) return end
+    c:ResolveUser(a, function(u)
+        if not u then Lib:Notify({ Title = "Group chat", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+        task.spawn(function()
+            local d = Decode(c:_Do("/group/invite", nil, "POST", HttpService:JSONEncode({ id = g.gid, uids = { tonumber(u.uid) } })))
+            if d and d.ok then
+                Lib:Notify({ Title = "Group chat", Text = "Invited " .. tostring(u.display or u.name) .. ".", Type = "success", Duration = 3 })
+                c:_PollOnce()
+            else
+                Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't invite them.", Type = "error" })
+            end
+        end)
+    end)
+end, true)
+Def("rename", "/rename <name>", "Rename this group (owner only).", function(c, a)
+    local g = CurGroup(c)
+    if not g then return end
+    if a == "" then c:RenameGroup(g.gid) return end
+    local name = CleanPart(a, 32)
+    task.spawn(function()
+        local d = Decode(c:_Do("/group/rename", nil, "POST", HttpService:JSONEncode({ id = g.gid, name = name })))
+        if d and d.ok then
+            g.name = name
+            c:_RefreshChannel()
+            c:SaveConvos()
+            Lib:Notify({ Title = "Group chat", Text = "Renamed to «" .. name .. "».", Type = "success", Duration = 3 })
+        else
+            Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't rename.", Type = "error" })
+        end
+    end)
+end, true)
+Def("leave", "/leave", "Leave this group.", function(c)
+    local g = CurGroup(c)
+    if g then c:LeaveGroup(g) end
+end, true)
+Def("help", "/help", "Show this list.", function(c) c:ShowHelp() end)
+
+function Chat:ShowHelp()
+    local Z, W, HH = 140, 350, 430
+    local dim = New("TextButton", { Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.45, BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+    local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 1,
+        Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+    Corner(card, 10) Stroke(card)
+    New("UIScale", { Scale = math.min(1, Lib.Overlay.AbsoluteSize.X / (W + 20), Lib.Overlay.AbsoluteSize.Y / (HH + 20)), Parent = card })
+    New("TextLabel", { Text = "Slash commands", Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -80, 0, 30), Position = UDim2.fromOffset(12, 0),
+        TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+    local close = New("TextButton", { Text = "Close", TextSize = 12, Size = UDim2.fromOffset(52, 22), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 4),
+        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+    Corner(close, 5)
+    local function Close() if dim.Parent then dim:Destroy() end end
+    close.Activated:Connect(Close)
+    dim.Activated:Connect(Close)
+    New("TextLabel", { Text = "Only in DMs and group chats. Start a message with // to send a literal slash.", TextSize = 11, Size = UDim2.new(1, -24, 0, 14),
+        Position = UDim2.fromOffset(12, 30), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 2, Theme = { TextColor3 = "Dim" }, Parent = card })
+    local scroll = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -54), Position = UDim2.fromOffset(8, 48), AutomaticCanvasSize = Y, ScrollBarThickness = 2, ZIndex = Z + 2, Parent = card })
+    List(scroll, 6)
+    for i, n in ipairs(CmdOrder) do
+        local c = Cmds[n]
+        local l = New("TextLabel", { RichText = true, TextSize = 12, Size = UDim2.new(1, -6, 0, 30), LayoutOrder = i, TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top,
+            ZIndex = Z + 3, Theme = { TextColor3 = "SubText" }, Parent = scroll,
+            Text = "<b><font color='#" .. Hex("Accent") .. "'>" .. Esc(c.usage) .. "</font></b>" .. (c.group and ("  <font color='#" .. Hex("Dim") .. "'>groups only</font>") or "")
+                .. "\n" .. Esc(c.desc) })
+        Wrap(l, nil, nil, 30)
+    end
+end
+
+-- /command suggestions while you type (DMs and groups only)
+function Chat:_InitSlash()
+    if self._slash then return end
+    self._slash = true
+    local input = self.Input
+    local par = (self._sb and self._sb.main) or self.Frame
+    local sug = Sink(New("Frame", { Name = "SlashSuggest", Visible = false, Size = UDim2.new(1, -16, 0, 0), AutomaticSize = Y, AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 8, 1, -(H(32) + 14)), BackgroundTransparency = 0, ZIndex = 22, Theme = { BackgroundColor3 = "Surface" }, Parent = par }))
+    Corner(sug, 6) Stroke(sug) Pad(sug, 3, 3, 3, 3) List(sug, 0)
+    input:GetPropertyChangedSignal("Text"):Connect(function()
+        for _, c in ipairs(sug:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+        local part = Private(self) and input.Text:match("^/(%w*)$")
+        if not part then sug.Visible = false return end
+        part = part:lower()
+        local cur = self.Channels[self.ChIndex]
+        local found = {}
+        for _, n in ipairs(CmdOrder) do
+            local c = Cmds[n]
+            if n:sub(1, #part) == part and not (c.group and not (cur and cur.kind == "grp")) then
+                found[#found + 1] = n
+                if #found >= 6 then break end
+            end
+        end
+        if #found == 0 then sug.Visible = false return end
+        sug.Position = UDim2.new(0, 8, 1, -(self.ListBottom - 2 + (self.ReplyTo and 28 or 0) + (self.TypeOn and 18 or 0)))
+        for i, n in ipairs(found) do
+            local c = Cmds[n]
+            local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, H(28)), LayoutOrder = i, ZIndex = 23, BackgroundTransparency = 1,
+                BackgroundColor3 = Lib.Theme.FieldHover, Parent = sug })
+            Corner(b, 4)
+            New("TextLabel", { RichText = true, TextSize = 12, Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(9, 0), TextXAlignment = LEFT,
+                TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 24, Text = "<b>/" .. n .. "</b>  <font color='#" .. Hex("Dim") .. "'>" .. Esc(c.desc) .. "</font>", Parent = b })
+            b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.3 }, 0.06) end)
+            b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+            local picked = false
+            local function Pick()
+                if picked then return end
+                picked = true
+                input.Text = "/" .. n .. " "
+                sug.Visible = false
+                task.defer(function() input:CaptureFocus() end)
+            end
+            b.InputBegan:Connect(function(i2) if IsPress(i2) then Pick() end end)
+            b.Activated:Connect(Pick)
+        end
+        sug.Visible = true
+    end)
+    input.FocusLost:Connect(function()
+        task.delay(0.3, function() if sug.Parent and not input:IsFocused() then sug.Visible = false end end)
+    end)
+end
+
+P.Send = Chat.Send
+function Chat:Send(text)
+    local t = Trim(text or "")
+    if t:sub(1, 6) == "[poll|" and not Private(self) then
+        self:System("Polls only work in DMs and group chats.")
+        return
+    end
+    if t:sub(1, 1) == "/" then
+        if t:sub(1, 2) == "//" then return P.Send(self, t:sub(2)) end
+        local name, args = t:match("^/(%w+)%s*(.-)%s*$")
+        if name then
+            name = name:lower()
+            local cmd = Cmds[name]
+            if not Private(self) then
+                if cmd then
+                    self:System("Slash commands only work in DMs and group chats. Open or start one to use /" .. name .. ".")
+                    return
+                end
+            elseif cmd then
+                if self.Blocked then return end
+                local ok, err = pcall(cmd.run, self, args)
+                if not ok then
+                    warn("[Aether] /" .. name .. ": " .. tostring(err))
+                    self:System("That command failed.")
+                end
+                return
+            else
+                self:System("Unknown command /" .. name .. ". Type /help for the list. (Start with // to send a literal slash.)")
+                return
+            end
+        end
+    end
+    return P.Send(self, text)
+end
+
+-- ==================== 5) PRESENCE CARDS (on by default) ====================
+local GameNames = {}
+function Lib:GameName(place, cb)
+    place = tonumber(place)
+    if not place then Safe(cb, "Unknown game") return end
+    local c = GameNames[place]
+    if c then Safe(cb, c) return end
+    task.spawn(function()
+        local ok, r = pcall(function() return Market:GetProductInfo(place).Name end)
+        local name = ok and tostring(r) or "a Roblox game"
+        GameNames[place] = name
+        Safe(cb, name)
+    end)
+end
+
+local sizeCache, sizeWait, sizeQ, sizeBusy = {}, {}, {}, false
+local function PumpSizes()
+    if sizeBusy then return end
+    sizeBusy = true
+    task.spawn(function()
+        while #sizeQ > 0 and not Lib.Unloaded do
+            local it = table.remove(sizeQ, 1)
+            local finished = false
+            local function Done(info, why)
+                if finished then return end
+                finished = true
+                sizeCache[it.job] = { t = os.clock(), info = info, why = why }
+                local w = sizeWait[it.job]
+                sizeWait[it.job] = nil
+                for _, f in ipairs(w or {}) do Safe(f, info, why) end
+            end
+            Lib:CheckServer(it.place, it.job, Done)
+            local t0 = os.clock()
+            while not finished and os.clock() - t0 < 25 do task.wait(0.1) end
+            Done(nil, "unreachable")
+            task.wait(0.4)
+        end
+        sizeBusy = false
+    end)
+end
+
+-- Lib:ServerSize(place, job, function(info, why) ... end)  info = { playing, max } or nil. Queued + cached for 45s.
+function Lib:ServerSize(place, job, cb)
+    local c = sizeCache[job]
+    if c and os.clock() - c.t < 45 then Safe(cb, c.info, c.why) return end
+    local w = sizeWait[job]
+    if w then table.insert(w, cb) return end
+    sizeWait[job] = { cb }
+    sizeQ[#sizeQ + 1] = { place = place, job = job }
+    PumpSizes()
+end
+
+function Chat:_PeerPresence()
+    if not Lib:LoadExtras().presence then return nil end
+    local ch = self.Channels[self.ChIndex]
+    if not (ch and ch.kind == "dm" and ch.uid) then return nil end
+    local id = tostring(ch.uid)
+    local f = self.Friends.byId[id]
+    local live
+    for _, x in ipairs(self.Users or {}) do
+        if tostring(x.uid) == id then live = x break end
+    end
+    if not (self.Friends.online[id] == true or live ~= nil) then return nil end
+    local src = {}
+    if f then for k, v in pairs(f) do src[k] = v end end
+    if live then for k, v in pairs(live) do if v ~= nil then src[k] = v end end end
+    local place, job = tonumber(src.place), src.job and tostring(src.job) or nil
+    if not place or place == 0 or not job or job == "" then return nil end
+    local priv = src.priv == true or src.priv == 1 or src.priv == "1"
+    local same = job == game.JobId or Players:GetPlayerByUserId(tonumber(ch.uid) or 0) ~= nil
+    return { uid = ch.uid, name = tostring(ch.name), place = place, job = job, priv = priv, same = same, friend = f }
+end
+
+function Chat:_InitPresence()
+    if self._presBar then return end
+    local parent = (self.PinBar and self.PinBar.Parent) or self.Frame
+    local ph = H(46)
+    self._presH = ph
+    local bar = New("Frame", { Name = "Presence", Size = UDim2.new(1, -16, 0, ph), Position = UDim2.fromOffset(8, self.BaseTop - 4), BackgroundTransparency = 0,
+        Visible = false, Theme = { BackgroundColor3 = "Field" }, Parent = parent })
+    Corner(bar, 6) Stroke(bar, "Good", 1, 0.6)
+    local stripe = New("Frame", { Size = UDim2.new(0, 3, 1, -14), Position = UDim2.fromOffset(6, 7), Theme = { BackgroundColor3 = "Good" }, Parent = bar })
+    Corner(stripe, 2)
+    New("TextLabel", { Text = "PLAYING", Font = Lib.FontBold, TextSize = 9, Size = UDim2.new(1, -96, 0, 11), Position = UDim2.fromOffset(16, 4), TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Good" }, Parent = bar })
+    self._presGame = New("TextLabel", { Text = "", Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, -96, 0, 15), Position = UDim2.fromOffset(16, 15), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = bar })
+    self._presSub = New("TextLabel", { Text = "", TextSize = 11, Size = UDim2.new(1, -96, 0, 13), Position = UDim2.fromOffset(16, 30), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "SubText" }, Parent = bar })
+    local join = New("TextButton", { Text = "Join", TextSize = 12, Size = UDim2.fromOffset(60, H(26)), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+        BackgroundTransparency = 0, TextColor3 = Color3.fromRGB(12, 16, 12), Theme = { BackgroundColor3 = "Good" }, Parent = bar })
+    Corner(join, 5)
+    self._presBar, self._presJoin = bar, join
+    join.Activated:Connect(function()
+        local p, pi = self._pres, self._pi or {}
+        if not p then return end
+        local function Go()
+            if p.friend then self:JoinFriend(p.friend) else Lib:JoinServer(p.place, p.job, p.name) end
+        end
+        if pi.size and pi.size.max > 0 and pi.size.playing >= pi.size.max then
+            Lib:Dialog({ Title = "Server is full", Text = p.name .. "'s server is at capacity right now. A spot may open up.",
+                Buttons = { { Text = "Cancel" }, { Text = "Try anyway", Primary = true, Callback = Go } } })
+        else
+            Go()
+        end
+    end)
+    self:_Relayout()
+    task.spawn(function()
+        while not Lib.Unloaded and bar.Parent do
+            pcall(function() self:_UpdatePresence() end)
+            task.wait(3)
+        end
+    end)
+end
+
+function Chat:_PaintPresence()
+    local p, pi = self._pres, self._pi or {}
+    if not (p and self._presBar) then return end
+    self._presGame.Text = pi.game or "Loading..."
+    local sub
+    if p.same then
+        sub = "In your server"
+    elseif p.priv then
+        sub = "Private server · ask them for an invite link"
+    elseif pi.size then
+        local full = pi.size.max > 0 and pi.size.playing >= pi.size.max
+        sub = pi.size.playing .. "/" .. pi.size.max .. " players · Public server" .. (full and " · FULL" or "")
+    else
+        sub = "Public server"
+    end
+    self._presSub.Text = sub
+    local canJoin = not p.same and not p.priv
+    self._presJoin.Visible = canJoin
+    local w = canJoin and -96 or -32
+    self._presGame.Size = UDim2.new(1, w, 0, 15)
+    self._presSub.Size = UDim2.new(1, w, 0, 13)
+end
+
+function Chat:_UpdatePresence(force)
+    local bar = self._presBar
+    if not bar then return end
+    local p = self:_PeerPresence()
+    local was = bar.Visible
+    if not p then
+        self._pres, self._presKey = nil, nil
+        if was then bar.Visible = false self:_Relayout() end
+        return
+    end
+    local key = p.uid .. ":" .. p.place .. ":" .. p.job .. ":" .. tostring(p.priv)
+    local changed = force or key ~= self._presKey
+    self._pres, self._presKey = p, key
+    if changed then
+        self._pi = {}
+        Lib:GameName(p.place, function(n)
+            if self._presKey == key and bar.Parent then
+                self._pi.game = n
+                self:_PaintPresence()
+            end
+        end)
+    end
+    if not p.priv and not p.same then
+        Lib:ServerSize(p.place, p.job, function(info)
+            if self._presKey == key and bar.Parent then
+                self._pi.size = info
+                self:_PaintPresence()
+            end
+        end)
+    end
+    self:_PaintPresence()
+    if not was then
+        bar.Visible = true
+        self:_Relayout()
+    end
+end
+
+-- the presence bar pushes pins + the message list down by its own height
+P.Relayout = Chat._Relayout
+function Chat:_Relayout()
+    P.Relayout(self)
+    local pb = self._presBar
+    if not pb then return end
+    local sOff = self.SearchOpen and 28 or 0
+    pb.Position = UDim2.fromOffset(8, self.BaseTop - 4 + sOff)
+    if not pb.Visible then return end
+    local extra = (self._presH or H(46)) + 4
+    local function Shift(f)
+        local pos, sz = f.Position, f.Size
+        f.Position = UDim2.new(pos.X.Scale, pos.X.Offset, pos.Y.Scale, pos.Y.Offset + extra)
+        f.Size = UDim2.new(sz.X.Scale, sz.X.Offset, sz.Y.Scale, sz.Y.Offset - extra)
+    end
+    local pp = self.PinBar.Position
+    self.PinBar.Position = UDim2.new(pp.X.Scale, pp.X.Offset, pp.Y.Scale, pp.Y.Offset + extra)
+    Shift(self.List)
+    Shift(self.NotifPanel)
+    self.Top = self.Top + extra
+    if self.NewBar then self.NewBar.Position = UDim2.new(0.5, 0, 0, self.Top + 4) end
+end
+
+P.SetChannel = Chat.SetChannel
+function Chat:SetChannel(i)
+    P.SetChannel(self, i)
+    pcall(function() self:_UpdatePresence(true) end)
+end
+
+-- "PLAYING NOW" cards for online friends, under the channel list
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    if not Lib:LoadExtras().presence then return end
+    local ok, err = pcall(function()
+        local friends = {}
+        for _, u in ipairs(self.Friends.friends) do
+            if self.Friends.online[tostring(u.uid)] then
+                local place, job = tonumber(u.place), u.job and tostring(u.job)
+                if place and place ~= 0 and job and job ~= "" then friends[#friends + 1] = u end
+            end
+        end
+        if #friends == 0 then return end
+        table.sort(friends, function(a, b) return tostring(a.display or a.name):lower() < tostring(b.display or b.name):lower() end)
+        local L = sb.list
+        local head = New("TextLabel", { Text = "PLAYING NOW", Font = Lib.FontBold, TextSize = 10, Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 5000, TextXAlignment = LEFT,
+            Theme = { TextColor3 = "Dim" }, Parent = L })
+        Pad(head, 6, 0, 0, 0)
+        for i = 1, math.min(#friends, 4) do
+            local u = friends[i]
+            local place, job = tonumber(u.place), tostring(u.job)
+            local priv = u.priv == true or u.priv == 1 or u.priv == "1"
+            local same = job == game.JobId
+            local canJoin = not priv and not same
+            local card = New("Frame", { Name = "PresenceCard", Size = UDim2.new(1, 0, 0, H(40)), LayoutOrder = 5000 + i, BackgroundTransparency = 0,
+                Theme = { BackgroundColor3 = "Field" }, Parent = L })
+            Corner(card, 5)
+            New("TextLabel", { Text = tostring(u.display or u.name), Font = Lib.FontBold, TextSize = 11, Size = UDim2.new(1, canJoin and -58 or -14, 0, 14),
+                Position = UDim2.fromOffset(8, 4), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+            local sub = New("TextLabel", { Text = "", TextSize = 10, Size = UDim2.new(1, canJoin and -58 or -14, 0, 13), Position = UDim2.fromOffset(8, 20),
+                TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = card })
+            local gname, size
+            local function Paint()
+                if not sub.Parent then return end
+                local t = gname or "..."
+                if same then t = t .. " · your server"
+                elseif priv then t = t .. " · private"
+                elseif size then t = t .. " · " .. size.playing .. "/" .. size.max end
+                sub.Text = t
+            end
+            Paint()
+            Lib:GameName(place, function(n) gname = n Paint() end)
+            if canJoin then
+                Lib:ServerSize(place, job, function(info) size = info Paint() end)
+                local jb = New("TextButton", { Text = "Join", TextSize = 11, Size = UDim2.fromOffset(44, H(22)), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+                    BackgroundTransparency = 0, TextColor3 = Color3.fromRGB(12, 16, 12), Theme = { BackgroundColor3 = "Good" }, Parent = card })
+                Corner(jb, 4)
+                jb.Activated:Connect(function() self:JoinFriend(u) end)
+            end
+        end
+    end)
+    if not ok then warn("[Aether] presence cards: " .. tostring(err)) end
+end
+
+-- ==================== 6) hooks + settings ====================
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p55 then
+        chat._p55 = true
+        Lib:LoadExtras()
+        local function Try(n, fn)
+            local ok, e = pcall(fn)
+            if not ok then warn("[Aether] " .. n .. ": " .. tostring(e)) end
+        end
+        Try("slash commands", function() chat:_InitSlash() end)
+        Try("presence", function() chat:_InitPresence() end)
+    end
+    return chat
+end
+
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p55 then
+        tab._p55 = true
+        pcall(function()
+            local ex = Lib:LoadExtras()
+            local sub = tab.Subs[1]
+            local gb
+            for _, g in ipairs(sub.Groupboxes) do if g.Name == "Chat" then gb = g end end
+            gb = gb or sub:AddRightGroupbox("Chat", { Icon = "message-square", Collapsible = true })
+            gb:AddToggle("PresenceCards", { Text = "Presence cards", Default = ex.presence, IgnoreConfig = true,
+                Tooltip = "Shows what game a friend is in, the server size and a Join button (DM header + sidebar). Your own game is shared with \"Share my game in chat\".",
+                Callback = function(v)
+                    ex.presence = v and true or false
+                    Lib:SaveExtras()
+                    local c = Lib.ChatObj
+                    if c then
+                        pcall(function() c:_UpdatePresence(true) end)
+                        c:_QueueSidebar()
+                    end
+                end })
+        end)
+    end
+    return tab
+end
+
+end
+-- ===================== end patch 5.6 =====================
+
 return Lib
