@@ -11816,4 +11816,1858 @@ end
 end
 -- ===================== end patch 4.9.1 =====================
 
+-- ===================== Aether patch 5.0 =====================
+do
+local P = {}
+Lib.Version = "5.0.0"
+
+Lib.ChatState = { drafts = {}, favs = {}, reads = {}, layout = "Discord" }
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/chatstate.json" end
+
+    function Lib:LoadChatState()
+        if loaded then return self.ChatState end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                local S = self.ChatState
+                if type(d.drafts) == "table" then
+                    for k, v in pairs(d.drafts) do if type(k) == "string" and type(v) == "string" then S.drafts[k] = v:sub(1, 500) end end
+                end
+                if type(d.favs) == "table" then
+                    for k, v in pairs(d.favs) do if type(k) == "string" and v == true then S.favs[k] = true end end
+                end
+                if type(d.reads) == "table" then
+                    for k, v in pairs(d.reads) do if type(k) == "string" and type(v) == "number" then S.reads[k] = v end end
+                end
+                if d.layout == "Compact" or d.layout == "Discord" then S.layout = d.layout end
+            end)
+        end
+        return self.ChatState
+    end
+
+    function Lib:SaveChatState()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.8, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                writefile(Path(), HttpService:JSONEncode(Lib.ChatState))
+            end)
+        end)
+    end
+end
+
+function Lib:SetFav(room, on)
+    local S = self:LoadChatState()
+    S.favs[room] = on and true or nil
+    self:SaveChatState()
+    local c = self.ChatObj
+    if c then c:_QueueSidebar() end
+end
+
+function Lib:_HookTeleportFail()
+    if self._tpHooked then return end
+    self._tpHooked = true
+    pcall(function()
+        Lib:Connect(Teleport.TeleportInitFailed, function(_, result, msg)
+            local j = Lib._join
+            if not j then return end
+            Lib._join = nil
+            local name = result and result.Name
+            if j.refresh and (name == "GameEnded" or name == "GameNotFound" or name == "Failure") then
+                j.refresh(function(p, jb)
+                    if p and jb and jb ~= "" and jb ~= j.job then
+                        Lib:Notify({ Title = "Join", Text = "They moved servers, following...", Type = "info", Duration = 2.5 })
+                        Lib:JoinServer(p, jb, j.label)
+                    else
+                        Lib:JoinFailed(j.place, j.job, j.label, result, msg)
+                    end
+                end)
+                return
+            end
+            Lib:JoinFailed(j.place, j.job, j.label, result, msg)
+        end)
+    end)
+end
+
+function Lib:JoinServer(place, job, label, refresh)
+    place, label = tonumber(place), label or "that server"
+    job = job and tostring(job) or nil
+    if not place or not job or job == "" then
+        Lib:Notify({ Title = "Join", Text = "There's no server to join.", Type = "warn" })
+        return
+    end
+    local busy = self._join
+    if busy and os.clock() - busy.t0 < 15 then
+        Lib:Notify({ Title = "Join", Text = "Already joining, give it a moment.", Type = "info", Duration = 2 })
+        return
+    end
+    self:_HookTeleportFail()
+    local j = { place = place, job = job, label = label, refresh = refresh, t0 = os.clock() }
+    self._join = j
+    Lib:Notify({ Title = "Join", Text = "Teleporting to " .. label .. "...", Type = "info", Duration = 3 })
+    local ok, err = pcall(function() Teleport:TeleportToPlaceInstance(place, job, LocalPlayer) end)
+    if not ok then
+        self._join = nil
+        self:JoinFailed(place, job, label, nil, tostring(err))
+        return
+    end
+    task.delay(25, function()
+        if self._join == j then
+            self._join = nil
+            Lib:Notify({ Title = "Join", Text = "Roblox didn't respond. Try again.", Type = "warn" })
+        end
+    end)
+end
+
+function Chat:JoinFriend(u)
+    local uid = tostring(u.uid)
+    local name = tostring(u.display or u.name or "friend")
+    Lib:Notify({ Title = "Join", Text = "Finding " .. name .. "'s server...", Type = "info", Duration = 2 })
+    local function Fresh(cb)
+        self:RefreshFriends(function()
+            local f = self.Friends.byId[uid]
+            cb(f and tonumber(f.place), f and f.job and tostring(f.job))
+        end)
+    end
+    self:RefreshFriends(function()
+        local f = self.Friends.byId[uid] or u
+        if f.priv == true or f.priv == 1 or f.priv == "1" then
+            Lib:Notify({ Title = "Join", Text = name .. " is in a private server. Ask them for the invite link.", Type = "warn", Duration = 5 })
+            return
+        end
+        local place, job = tonumber(f.place), f.job and tostring(f.job)
+        if not place or not job or job == "" then
+            Lib:Notify({ Title = "Join", Text = name .. " isn't sharing a server right now.", Type = "warn" })
+            return
+        end
+        if job == game.JobId then
+            Lib:Notify({ Title = "Join", Text = "You're already in their server.", Type = "info" })
+            return
+        end
+        Lib:JoinServer(place, job, name, Fresh)
+    end)
+end
+
+function Chat:_FriendByLabel(text)
+    local best
+    for _, u in ipairs(self.Friends.friends) do
+        if tostring(u.display or u.name) == text or tostring(u.name) == text then
+            if not best or (tonumber(u.place) or 0) > (tonumber(best.place) or 0) then best = u end
+        end
+    end
+    return best
+end
+
+local function AddJoin(self, d)
+    if not (d.Parent and d:IsA("TextButton") and d.Text == "Message") then return end
+    local row = d.Parent
+    if not row:IsA("TextButton") or row:FindFirstChild("JoinBtn") then return end
+    local lab = row:FindFirstChildWhichIsA("TextLabel")
+    local u = lab and self:_FriendByLabel(lab.Text)
+    if not u or not self.Friends.online[tostring(u.uid)] then return end
+    local place, job = tonumber(u.place), u.job and tostring(u.job)
+    local priv = u.priv == true or u.priv == 1 or u.priv == "1"
+    if not place or not job or job == "" or job == game.JobId or priv then return end
+    for _, c in ipairs(row:GetChildren()) do
+        if c:IsA("TextLabel") then c.Size = UDim2.new(c.Size.X.Scale, c.Size.X.Offset - 58, 0, c.Size.Y.Offset) end
+    end
+    local jb = New("TextButton", { Name = "JoinBtn", Text = "Join", TextSize = 11, Size = UDim2.fromOffset(54, H(24)), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -64, 0.5, 0), BackgroundTransparency = 0, ZIndex = d.ZIndex, TextColor3 = Color3.fromRGB(12, 16, 12),
+        Theme = { BackgroundColor3 = "Good" }, Parent = row })
+    Corner(jb, 4)
+    jb.Activated:Connect(function() self:JoinFriend(u) end)
+end
+
+P.ShowFriends = Chat.ShowFriends
+function Chat:ShowFriends(startTab)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowFriends(self, startTab)
+    local dim
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do
+        if not before[c] and c:IsA("TextButton") then dim = c end
+    end
+    if not dim then return end
+    for _, d in ipairs(dim:GetDescendants()) do pcall(AddJoin, self, d) end
+    dim.DescendantAdded:Connect(function(d) task.defer(function() pcall(AddJoin, self, d) end) end)
+end
+
+Lib._CfgPrev = {}
+
+function Lib:_FeatureText(data)
+    local on, off, sl, dd, kb = {}, 0, 0, 0, 0
+    for idx, v in pairs(data) do
+        if type(v) == "table" and type(v.Type) == "string" and not tostring(idx):find("^__") then
+            local o = self.Options[idx]
+            if not (o and o.Info and o.Info.IgnoreConfig) then
+                local t = v.Type
+                if t == "Toggle" then
+                    if v.Value == true then
+                        local n = o and o.Info and o.Info.Text
+                        if type(n) ~= "string" or n == "" then n = (tostring(idx):gsub("(%l)(%u)", "%1 %2")) end
+                        local s = RichEsc(n)
+                        if o and o.Info and o.Info.Risky then s = "<font color='#" .. Hex("Bad") .. "'>" .. s .. "</font>" end
+                        if not o then s = s .. " <font color='#" .. Hex("Dim") .. "'>(not in this hub)</font>" end
+                        on[#on + 1] = { key = n:lower(), s = s }
+                    else
+                        off = off + 1
+                    end
+                elseif t == "Slider" or t == "Range" then sl = sl + 1
+                elseif t == "Dropdown" or t == "Segmented" or t == "Input" then dd = dd + 1
+                elseif t == "KeyPicker" then kb = kb + 1 end
+            end
+        end
+    end
+    table.sort(on, function(a, b) return a.key < b.key end)
+    local lines = { "<b>" .. #on .. " feature" .. (#on == 1 and "" or "s") .. " turned on</b>" }
+    lines[2] = "<font color='#" .. Hex("Dim") .. "'>" .. off .. " off · " .. sl .. " sliders · " .. dd .. " dropdowns/inputs · " .. kb .. " keybinds</font>"
+    if #on == 0 then lines[#lines + 1] = "Nothing is switched on in this config." end
+    for i = 1, math.min(#on, 20) do lines[#lines + 1] = "• " .. on[i].s end
+    if #on > 20 then lines[#lines + 1] = "<font color='#" .. Hex("Dim") .. "'>+" .. (#on - 20) .. " more</font>" end
+    return table.concat(lines, "\n")
+end
+
+P.BuildConfigCard = Lib._BuildConfigCard
+function Lib:_BuildConfigCard(chat, parent, cfg, order)
+    P.BuildConfigCard(self, chat, parent, cfg, order)
+    local ok, err = pcall(function()
+        local card = parent:FindFirstChild("ConfigCard")
+        if not card then return end
+        local id = tostring(cfg.id or "")
+        local copyBtn
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("TextLabel") then c.Size = UDim2.new(c.Size.X.Scale, c.Size.X.Offset - 64, 0, c.Size.Y.Offset)
+            elseif c:IsA("TextButton") then copyBtn = c end
+        end
+        if not copyBtn then return end
+        copyBtn.AnchorPoint, copyBtn.Position = Vector2.new(1, 0), UDim2.new(1, -8, 0, 11)
+        local pv = New("TextButton", { Text = "Preview", TextSize = 11, Size = UDim2.fromOffset(56, 28), AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(1, -72, 0, 11), BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field", TextColor3 = "SubText" }, Parent = card })
+        Corner(pv, 6)
+        local open, lbl = false, nil
+        local function Close()
+            open = false
+            pv.Text = "Preview"
+            if lbl then lbl:Destroy() lbl = nil end
+            card.Size = UDim2.new(1, 0, 0, 50)
+        end
+        pv.Activated:Connect(function()
+            if open then Close() return end
+            open = true
+            pv.Text = "Hide"
+            lbl = New("TextLabel", { Name = "CfgFeatures", RichText = true, Text = "Loading...", TextSize = 12, Size = UDim2.new(1, -28, 0, 14), Position = UDim2.fromOffset(14, 54),
+                TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top, Theme = { TextColor3 = "SubText" }, Parent = card })
+            Wrap(lbl, card, 66, 14)
+            local my = lbl
+            local function Fill(data) if lbl == my and my.Parent then my.Text = Lib:_FeatureText(data) end end
+            if Lib._CfgPrev[id] then Fill(Lib._CfgPrev[id]) return end
+            task.spawn(function()
+                local d = Decode(chat:_Do("/cfg", { id = id }))
+                local data
+                if d and d.ok and type(d.data) == "string" and #d.data <= 60000 then
+                    local dec, t = pcall(HttpService.JSONDecode, HttpService, d.data)
+                    if dec and type(t) == "table" then data = t end
+                end
+                if not data then
+                    if lbl == my and my.Parent then my.Text = (d and d.error == "expired") and "That config has expired." or "Couldn't load the preview." end
+                    return
+                end
+                Lib._CfgPrev[id] = data
+                Fill(data)
+            end)
+        end)
+    end)
+    if not ok then warn("[Aether] config preview: " .. tostring(err)) end
+end
+
+function Chat:_ClampItem(item)
+    local col = item and item:FindFirstChild("Col")
+    if not col then return end
+    local cap = math.max(self.Frame.Size.X.Offset - (self.Wide and self.SBW or 0) - 66, 160)
+    if col.Size.X.Offset > cap then col.Size = UDim2.new(0, cap, 0, 0) end
+    local bubble = col:FindFirstChild("Bubble")
+    if bubble and bubble.Size.X.Offset > cap then bubble.Size = UDim2.new(0, cap, 0, 0) end
+end
+
+for _, nm in ipairs({ "_RefitBubble", "_StyleHead", "_RenderReactions" }) do
+    local orig = Chat[nm]
+    if orig then
+        Chat[nm] = function(self, item, ...)
+            local r = orig(self, item, ...)
+            pcall(self._ClampItem, self, item)
+            return r
+        end
+    end
+end
+
+function Chat:_PlaceDivider(item)
+    self.Counter = self.Counter + 1
+    local div = New("Frame", { Name = "NewDivider", Size = UDim2.new(1, 0, 0, H(22)), BackgroundTransparency = 1, LayoutOrder = item.LayoutOrder, Parent = self.List })
+    item.LayoutOrder = self.Counter
+    New("Frame", { Size = UDim2.new(1, -8, 0, 1), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0), BackgroundTransparency = 0.35,
+        Theme = { BackgroundColor3 = "Bad" }, Parent = div })
+    local pill = New("TextLabel", { Text = "NEW", Font = Lib.FontBold, TextSize = 10, AutomaticSize = X, Size = UDim2.fromOffset(0, 14), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -6, 0.5, 0), BackgroundTransparency = 0, TextColor3 = WHITE, Theme = { BackgroundColor3 = "Bad" }, Parent = div })
+    Corner(pill, 7) Pad(pill, 6, 0, 6, 0)
+    table.insert(self.Items, #self.Items, div)
+    self._div, self._divCount = div, 0
+end
+
+function Chat:_UpdateNewBar()
+    local bar, div = self.NewBar, self._div
+    if not bar then return end
+    if not (div and div.Parent) then bar.Visible = false return end
+    local n = self._divCount or 1
+    bar.Text = "↑ " .. n .. " new message" .. (n == 1 and "" or "s") .. " · Jump"
+    bar.Visible = (div.AbsolutePosition.Y + div.AbsoluteSize.Y) < (self.List.AbsolutePosition.Y + 6)
+end
+
+P.ClearAll = Chat._ClearAll
+function Chat:_ClearAll()
+    P.ClearAll(self)
+    self._div, self._divCount = nil, 0
+    if self.NewBar then self.NewBar.Visible = false end
+end
+
+P.Relayout = Chat._Relayout
+function Chat:_Relayout()
+    P.Relayout(self)
+    if self.NewBar then self.NewBar.Position = UDim2.new(0.5, 0, 0, self.Top + 4) end
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local last = self.Items[#self.Items]
+    local res = P.AddMessage(self, msg)
+    local item = self.Items[#self.Items]
+    if item and item ~= last and type(msg) == "table" and (msg.type == nil or msg.type == "msg") and self.Meta[item] then
+        pcall(function()
+            self:_ClampItem(item)
+            local mine = tostring(msg.uid) == tostring(LocalPlayer.UserId)
+            local isNew = self._divAt and type(msg.id) == "number" and msg.id > self._divAt and not mine
+            if isNew and not self._div and not self.Loaded then
+                local hasPrior = false
+                for _, it in ipairs(self.Items) do
+                    if it == item then break end
+                    if self.Meta[it] then hasPrior = true break end
+                end
+                if hasPrior then self:_PlaceDivider(item) end
+            end
+            if isNew and self._div then
+                self._divCount = (self._divCount or 0) + 1
+                task.defer(function() self:_UpdateNewBar() end)
+            end
+        end)
+    end
+    return res
+end
+
+P.SetChannel = Chat.SetChannel
+function Chat:SetChannel(i)
+    local ch = self.Channels[i]
+    if not ch or i == self.ChIndex then return P.SetChannel(self, i) end
+    local S = Lib:LoadChatState()
+    local old = self.Channels[self.ChIndex]
+    if old then
+        local t = self.Input.Text
+        S.drafts[old.room] = (Trim(t) ~= "") and t:sub(1, 500) or nil
+        if self.PanelObj._shown and self.LastId and self.LastId > 0 then S.reads[old.room] = self.LastId end
+    end
+    local r = math.max(tonumber(ch.read) or 0, S.reads[ch.room] or 0)
+    self._divAt = r > 0 and r or nil
+    P.SetChannel(self, i)
+    local d = S.drafts[ch.room]
+    self.Input.Text = d or ""
+    task.defer(function() self.TypingUntil = 0 end)
+    Lib:SaveChatState()
+    self:_QueueSidebar()
+end
+
+function Chat:_StashState()
+    local S = Lib.ChatState
+    local ch = self.Channels[self.ChIndex]
+    if not ch then return end
+    if self.PanelObj._shown and self.LastId and self.LastId > 0 then S.reads[ch.room] = self.LastId end
+    local t = self.Input.Text
+    S.drafts[ch.room] = (Trim(t) ~= "") and t:sub(1, 500) or nil
+    Lib:SaveChatState()
+end
+
+function Chat:_QueueSidebar()
+    if not self._sb or self._sbQ then return end
+    self._sbQ = true
+    task.defer(function()
+        self._sbQ = false
+        pcall(function() self:_RenderSidebar() end)
+    end)
+end
+
+function Chat:_RenderSidebar()
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local S, list, rh = Lib.ChatState, sb.list, H(26)
+    for _, c in ipairs(list:GetChildren()) do
+        if not c:IsA("UIListLayout") and not c:IsA("UIPadding") then c:Destroy() end
+    end
+    local order = 0
+    local function Head(t, plus, fn)
+        order = order + 1
+        local h = New("Frame", { Size = UDim2.new(1, 0, 0, 18), LayoutOrder = order, BackgroundTransparency = 1, Parent = list })
+        New("TextLabel", { Text = t, Font = Lib.FontBold, TextSize = 10, Size = UDim2.new(1, -24, 1, 0), Position = UDim2.fromOffset(6, 0), TextXAlignment = LEFT,
+            Theme = { TextColor3 = "Dim" }, Parent = h })
+        if plus then
+            local pb = New("TextButton", { Text = "+", Font = Lib.FontBold, TextSize = 15, Size = UDim2.fromOffset(20, 18), AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, 0, 0, 0), Theme = { TextColor3 = "SubText" }, Parent = h })
+            pb.Activated:Connect(fn)
+            Lib:AddTooltip(pb, plus)
+        end
+    end
+    local function Row(i, ch)
+        order = order + 1
+        local cur = i == self.ChIndex
+        local unread = (not cur) and (ch.unread or 0) or 0
+        local fav = S.favs[ch.room] == true
+        local b = New("TextButton", { Name = "Ch", Text = "", Size = UDim2.new(1, 0, 0, rh), LayoutOrder = order, BackgroundTransparency = cur and 0.35 or 1,
+            Theme = { BackgroundColor3 = cur and "FieldHover" or "Field" }, Parent = list })
+        Corner(b, 5)
+        if ch.kind == "dm" then
+            local on = ch.uid and self.Friends.online[tostring(ch.uid)]
+            local dot = New("Frame", { Size = UDim2.fromOffset(8, 8), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 7, 0.5, 0),
+                BackgroundColor3 = on and Lib.Theme.Good or Lib.Theme.Dim, Parent = b })
+            Corner(dot, 4)
+        else
+            New("TextLabel", { Text = ch.kind == "grp" and "«" or "#", Font = Lib.FontBold, TextSize = 13, Size = UDim2.fromOffset(16, rh), Position = UDim2.fromOffset(4, 0),
+                Theme = { TextColor3 = cur and "Accent" or "Dim" }, Parent = b })
+        end
+        New("TextLabel", { Text = tostring(ch.name or "?"), Font = (cur or unread > 0) and Lib.FontBold or Lib.Font, TextSize = 12, Size = UDim2.new(1, -(24 + 38), 1, 0),
+            Position = UDim2.fromOffset(22, 0), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd,
+            Theme = { TextColor3 = (cur or unread > 0) and "Text" or "SubText" }, Parent = b })
+        if unread > 0 then
+            local bd = New("Frame", { Size = UDim2.fromOffset(unread > 9 and 22 or 16, 14), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -20, 0.5, 0),
+                Theme = { BackgroundColor3 = "Bad" }, BackgroundTransparency = 0, Parent = b })
+            Corner(bd, 7)
+            New("TextLabel", { Text = unread > 9 and "9+" or tostring(unread), Font = Lib.FontBold, TextSize = 9, Size = UDim2.fromScale(1, 1), TextColor3 = WHITE, Parent = bd })
+        elseif (S.drafts[ch.room] or "") ~= "" and not cur then
+            New("TextLabel", { Text = "✎", TextSize = 11, Size = UDim2.fromOffset(16, rh), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -20, 0, 0),
+                Theme = { TextColor3 = "Dim" }, Parent = b })
+        end
+        local star = New("TextButton", { Text = "", Size = UDim2.fromOffset(18, rh), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -2, 0, 0),
+            Visible = fav or (Lib.Touch and cur), ZIndex = 3, Parent = b })
+        Lib.Icon("star", 12, fav and "Warn" or "Dim", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 4, Parent = star }, "*")
+        star.Activated:Connect(function() Lib:SetFav(ch.room, not fav) end)
+        b.MouseEnter:Connect(function()
+            star.Visible = true
+            if not cur then Tween(b, { BackgroundTransparency = 0.6 }, 0.06) end
+        end)
+        b.MouseLeave:Connect(function()
+            star.Visible = fav or (Lib.Touch and cur)
+            if not cur then Tween(b, { BackgroundTransparency = 1 }, 0.08) end
+        end)
+        b.Activated:Connect(function() self:SetChannel(i) end)
+    end
+
+    local favs, pubs, dms, grps = {}, {}, {}, {}
+    for i, ch in ipairs(self.Channels) do
+        local e = { i, ch }
+        if S.favs[ch.room] then favs[#favs + 1] = e
+        elseif ch.kind == "dm" then dms[#dms + 1] = e
+        elseif ch.kind == "grp" then grps[#grps + 1] = e
+        else pubs[#pubs + 1] = e end
+    end
+    if #favs > 0 then
+        Head("FAVORITES")
+        for _, e in ipairs(favs) do Row(e[1], e[2]) end
+    end
+    Head("CHANNELS")
+    for _, e in ipairs(pubs) do Row(e[1], e[2]) end
+    Head("DIRECT MESSAGES", "New DM", function() self:PickUser(function(u) self:OpenDM(u.uid, u.name, u.display) end, "DM who?") end)
+    for _, e in ipairs(dms) do Row(e[1], e[2]) end
+    Head("GROUPS", "New group", function() self:NewGroup() end)
+    for _, e in ipairs(grps) do Row(e[1], e[2]) end
+    local n = #self.Friends.incoming
+    if self._frBtn then self._frBtn.Text = n > 0 and ("Friends · " .. n) or "Friends" end
+end
+
+function Chat:_SidebarLayout()
+    local sb = self._sb
+    if not sb then return end
+    local w = self.Frame.Size.X.Offset
+    local wide = w >= 440 and (self.Full or Lib.ChatState.layout ~= "Compact")
+    local was = self.Wide
+    self.Wide = wide
+    sb.card.Visible = wide
+    local SW = wide and self.SBW or 0
+    sb.main.Position = UDim2.fromOffset(SW, 0)
+    sb.main.Size = UDim2.new(1, -SW, 1, 0)
+    local btn = self.ChBtn
+    local ar = H(26) + 4
+    for _, c in ipairs(btn.Parent:GetChildren()) do
+        if c:IsA("TextButton") and c ~= btn then c.Visible = not wide end
+    end
+    btn.Position = wide and UDim2.fromOffset(0, 0) or UDim2.fromOffset(ar, 0)
+    btn.Size = wide and UDim2.fromScale(1, 1) or UDim2.new(1, -(ar * 2), 1, 0)
+    if wide then self:_QueueSidebar() end
+    if was ~= wide then
+        for _, it in ipairs(self.Items) do pcall(self._ClampItem, self, it) end
+    end
+end
+
+function Chat:_ApplyLayout()
+    local S = Lib.ChatState
+    local panel, frame = self.PanelObj, self.Frame
+    if self.Full then self:_SidebarLayout() return end
+    panel.W = (S.layout == "Compact") and 310 or 540
+    if panel.Moved then
+        local vp, s = GetViewport(), Lib.Scale
+        frame.Size = UDim2.fromOffset(math.min(panel.W, (vp.X - 8) / s), frame.Size.Y.Offset)
+    else
+        Lib:_Place(panel)
+    end
+    self:_SidebarLayout()
+end
+
+function Chat:_InitSidebar()
+    if self._sb then return end
+    local frame, panel = self.Frame, self.PanelObj
+    self.SBW = 150
+    local main = New("Frame", { Name = "Main", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = frame })
+    for _, c in ipairs(frame:GetChildren()) do
+        if c ~= main and c ~= panel.Head and c:IsA("GuiObject") and c.Name ~= "HoverBar"
+            and not (c:IsA("Frame") and c.Size == UDim2.new(1, -24, 0, 1)) then
+            c.Parent = main
+        end
+    end
+    local card = New("Frame", { Name = "Sidebar", Position = UDim2.fromOffset(8, 44), Size = UDim2.new(0, self.SBW - 8, 1, -52), BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Surface" }, Parent = frame })
+    Corner(card, 6)
+    local list = New("ScrollingFrame", { Size = UDim2.new(1, -4, 1, -(H(26) + 12)), Position = UDim2.fromOffset(2, 4), AutomaticCanvasSize = Y, ScrollBarThickness = 0, Parent = card })
+    List(list, 1)
+    Pad(list, 4, 0, 4, 0)
+    local foot = New("Frame", { Size = UDim2.new(1, -8, 0, H(26)), AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -4), BackgroundTransparency = 1, Parent = card })
+    List(foot, 4, Enum.FillDirection.Horizontal)
+    local function FBtn(text, ord, fn)
+        local b = New("TextButton", { Text = text, TextSize = 11, Size = UDim2.new(0.5, -2, 1, 0), LayoutOrder = ord, BackgroundTransparency = 0,
+            TextTruncate = Enum.TextTruncate.AtEnd, Theme = { BackgroundColor3 = "Field", TextColor3 = "SubText" }, Parent = foot })
+        Corner(b, 5)
+        b.MouseEnter:Connect(function() Tween(b, { BackgroundColor3 = Lib.Theme.FieldHover, TextColor3 = Lib.Theme.Text }, 0.08) end)
+        b.MouseLeave:Connect(function() Tween(b, { BackgroundColor3 = Lib.Theme.Field, TextColor3 = Lib.Theme.SubText }, 0.1) end)
+        b.Activated:Connect(fn)
+        return b
+    end
+    self._frBtn = FBtn("Friends", 1, function() self:ShowFriends() end)
+    FBtn("Pins", 2, function() self:ShowPins() end)
+    self._sb = { main = main, card = card, list = list }
+
+    self.NewBar = New("TextButton", { Name = "NewBar", Text = "", TextSize = 11, Size = UDim2.fromOffset(0, 22), AutomaticSize = X, AnchorPoint = Vector2.new(0.5, 0),
+        Position = UDim2.new(0.5, 0, 0, self.Top + 4), Visible = false, ZIndex = 12, BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = main })
+    Corner(self.NewBar, 11) Pad(self.NewBar, 12, 0, 12, 0)
+    self.NewBar.Activated:Connect(function()
+        if self._div and self._div.Parent then self:_JumpItem(self._div) end
+        task.delay(0.4, function() self:_UpdateNewBar() end)
+    end)
+    self.List:GetPropertyChangedSignal("CanvasPosition"):Connect(function() self:_UpdateNewBar() end)
+    self.List:GetPropertyChangedSignal("AbsoluteCanvasSize"):Connect(function() self:_UpdateNewBar() end)
+    frame:GetPropertyChangedSignal("Size"):Connect(function() self:_SidebarLayout() end)
+
+    local S = Lib:LoadChatState()
+    local r = S.reads[self.Room]
+    self._divAt = (r and r > 0) and r or nil
+    local d = S.drafts[self.Room]
+    if d and d ~= "" then
+        self.Input.Text = d
+        task.defer(function() self.TypingUntil = 0 end)
+    end
+    task.spawn(function()
+        while not Lib.Unloaded and self.Frame and self.Frame.Parent do
+            task.wait(10)
+            pcall(function() self:_StashState() end)
+        end
+    end)
+    self:_ApplyLayout()
+    self:_RenderSidebar()
+end
+
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+    P.RefreshChannel(self)
+    self:_QueueSidebar()
+end
+
+P.SyncFriends = Chat._SyncFriends
+function Chat:_SyncFriends(fr)
+    P.SyncFriends(self, fr)
+    self:_QueueSidebar()
+end
+
+P.Menu = Chat.Menu
+function Chat:Menu(items, anchor)
+    if anchor ~= nil and anchor == self.ChBtn then
+        local favs = {}
+        for i, ch in ipairs(self.Channels) do
+            if Lib.ChatState.favs[ch.room] then
+                favs[#favs + 1] = { Text = (i == self.ChIndex and "• " or "   ") .. "* " .. Short(ch.name, 18), Callback = function() self:SetChannel(i) end }
+            end
+        end
+        if #favs > 0 then
+            table.insert(items, 1, { Header = true, Text = "FAVORITES" })
+            for k, f in ipairs(favs) do table.insert(items, 1 + k, f) end
+        end
+    end
+    return P.Menu(self, items, anchor)
+end
+
+P.HookItem = Chat._HookItem
+function Chat:_HookItem(item, msg)
+    P.HookItem(self, item, msg)
+    if not (Lib.Touch and msg and msg.id) then return end
+    local last = 0
+    item.Activated:Connect(function()
+        local now = os.clock()
+        if now - last < 0.32 then last = 0 return end
+        last = now
+        task.delay(0.34, function()
+            if last ~= now or not item.Parent then return end
+            last = 0
+            if os.clock() - (item:GetAttribute("lp") or 0) < 0.7 then return end
+            self:OpenMessageMenu(msg, true)
+        end)
+    end)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p50 then
+        chat._p50 = true
+        local ok, err = pcall(function() chat:_InitSidebar() end)
+        if not ok then warn("[Aether] sidebar: " .. tostring(err)) end
+    end
+    return chat
+end
+
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p50 then
+        tab._p50 = true
+        pcall(function()
+            local S = Lib:LoadChatState()
+            local sub = tab.Subs[1]
+            local gb
+            for _, g in ipairs(sub.Groupboxes) do if g.Name == "Chat" then gb = g end end
+            gb = gb or sub:AddRightGroupbox("Chat", { Icon = "message-square", Collapsible = true })
+            gb:AddDropdown("ChatLayout", { Text = "Chat layout", Values = { "Discord", "Compact" }, Default = S.layout, IgnoreConfig = true,
+                Tooltip = "Discord: channel sidebar on the left. Compact: the small single-column chat.",
+                Callback = function(v)
+                    S.layout = v == "Compact" and "Compact" or "Discord"
+                    Lib:SaveChatState()
+                    local c = Lib.ChatObj
+                    if c and c._sb then c:_ApplyLayout() end
+                end })
+        end)
+    end
+    return tab
+end
+
+end
+-- ===================== end patch 5.0 =====================
+
+-- ===================== Aether patch 5.1 (group icons) =====================
+do
+local P = {}
+Lib.Version = "5.1.0"
+
+Lib.GroupIcons = {}
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/groupicons.json" end
+
+    function Lib:LoadGroupIcons()
+        if loaded then return self.GroupIcons end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                for gid, e in pairs(d) do
+                    if type(gid) == "string" and type(e) == "table" and e.id ~= nil and #tostring(e.id) < 80 then
+                        self.GroupIcons[gid] = { id = tostring(e.id), mime = type(e.mime) == "string" and e.mime or "image/png", shared = e.shared == true }
+                    end
+                end
+            end)
+        end
+        return self.GroupIcons
+    end
+
+    function Lib:SaveGroupIcons()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.8, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                writefile(Path(), HttpService:JSONEncode(Lib.GroupIcons))
+            end)
+        end)
+    end
+end
+
+function Chat:_IconAsset(entry, room, cb)
+    local id = tostring(entry.id)
+    local cached = Lib.ImgAssets[id]
+    if cached then cb(cached) return end
+    if not (FsOk() and (getcustomasset or getsynasset)) then return end
+    task.spawn(function()
+        local base = Lib.ConfigFolder .. "/cache/gi_" .. id:gsub("[^%w_%-]", "")
+        local asset
+        for _, ext in ipairs({ ".png", ".jpg", ".bmp" }) do
+            local ok, ex = pcall(isfile, base .. ext)
+            if ok and ex then asset = CustomAsset(base .. ext) break end
+        end
+        if not asset then
+            local res = self:_Do("/imgraw", { id = id }, nil, nil, room)
+            if res and res.StatusCode == 200 and type(res.Body) == "string" and #res.Body > 64 and res.Body:sub(1, 1) ~= "{" then
+                CachePath("x", "image/png")
+                local ext = ThumbExt(res.Body) or ".png"
+                if pcall(writefile, base .. ext, res.Body) then asset = CustomAsset(base .. ext) end
+            end
+        end
+        if asset then
+            Lib.ImgAssets[id] = asset
+            cb(asset)
+        end
+    end)
+end
+
+function Chat:ChooseGroupIcon(ch)
+    if not (ch and ch.kind == "grp" and ch.gid) then return end
+    self._iconPick = { gid = tostring(ch.gid), room = ch.room, name = tostring(ch.name or "group"), shown = false }
+    Lib:Notify({ Title = "Group icon", Text = "Search for a picture, then tap it to use it for «" .. tostring(ch.name) .. "».", Type = "info", Duration = 4 })
+    self:PickSearch()
+end
+
+P.ShowResults = Chat.ShowResults
+function Chat:ShowResults(q)
+    local pk = self._iconPick
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowResults(self, q)
+    if not pk then return end
+    pk.shown = true
+    local dim
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do
+        if not before[c] and c:IsA("TextButton") then dim = c end
+    end
+    if dim then
+        dim.Destroying:Connect(function()
+            task.delay(0.5, function() if self._iconPick == pk then self._iconPick = nil end end)
+        end)
+    end
+end
+
+P.SendImage = Chat.SendImage
+function Chat:SendImage(payload)
+    local pk = self._iconPick
+    if pk then
+        self._iconPick = nil
+        if pk.shown and pk.room == self.Room then
+            self:_SetGroupIcon(pk, payload)
+            return
+        end
+    end
+    return P.SendImage(self, payload)
+end
+
+function Chat:_SetGroupIcon(pk, payload)
+    Lib:Notify({ Title = "Group icon", Text = "Uploading...", Type = "info", Duration = 2 })
+    task.spawn(function()
+        local d = Decode(self:_Do("/upload", nil, "POST", HttpService:JSONEncode(payload), pk.room))
+        if not (d and d.ok and d.id ~= nil) then
+            Lib:Notify({ Title = "Group icon", Text = (d and d.error) or "Upload failed.", Type = "error" })
+            return
+        end
+        local entry = { id = tostring(d.id), mime = type(d.mime) == "string" and d.mime or "image/png", shared = false }
+        local res = self:_Do("/group/icon", nil, "POST", HttpService:JSONEncode({ id = pk.gid, image = d.id }), pk.room)
+        local r = Decode(res)
+        local text
+        if r and r.ok then
+            entry.shared = true
+            text = "Icon updated for «" .. pk.name .. "»."
+        elseif r and r.error and res and res.StatusCode ~= 404 then
+            Lib:Notify({ Title = "Group icon", Text = tostring(r.error), Type = "error" })
+            return
+        else
+            text = "Icon set for you. Others will see it once your worker supports /group/icon."
+        end
+        Lib:LoadGroupIcons()[pk.gid] = entry
+        Lib:SaveGroupIcons()
+        self:_QueueSidebar()
+        Lib:Notify({ Title = "Group icon", Text = text, Type = "success", Duration = 4 })
+    end)
+end
+
+function Chat:ClearGroupIcon(ch)
+    if not (ch and ch.gid) then return end
+    local gid = tostring(ch.gid)
+    local I = Lib:LoadGroupIcons()
+    if not I[gid] then return end
+    local was = I[gid]
+    I[gid] = nil
+    Lib:SaveGroupIcons()
+    self:_QueueSidebar()
+    if was.shared then
+        task.spawn(function()
+            local r = Decode(self:_Do("/group/icon", nil, "POST", HttpService:JSONEncode({ id = gid, clear = true }), ch.room))
+            if not (r and r.ok) then
+                Lib:Notify({ Title = "Group icon", Text = (r and r.error) or "Removed for you, but the server didn't clear it.", Type = "warn", Duration = 4 })
+            end
+        end)
+    end
+end
+
+function Chat:GroupIconMenu(ch, anchor)
+    local items = { { Text = "Change group icon...", Callback = function() self:ChooseGroupIcon(ch) end } }
+    if Lib:LoadGroupIcons()[tostring(ch.gid)] then
+        table.insert(items, { Text = "Remove group icon", Danger = true, Callback = function() self:ClearGroupIcon(ch) end })
+    end
+    self:Menu(items, anchor)
+end
+
+P.Menu = Chat.Menu
+function Chat:Menu(items, anchor)
+    local cur = self.Channels[self.ChIndex]
+    if anchor ~= nil and anchor == self.ChBtn and cur and cur.kind == "grp" then
+        local at
+        for i, it in ipairs(items) do
+            if it.Text == "Rename group..." then at = i break end
+        end
+        local pos = at and (at + 1) or (#items + 1)
+        table.insert(items, pos, { Text = "Change group icon...", Callback = function() self:ChooseGroupIcon(cur) end })
+        if Lib:LoadGroupIcons()[tostring(cur.gid)] then
+            table.insert(items, pos + 1, { Text = "Remove group icon", Danger = true, Callback = function() self:ClearGroupIcon(cur) end })
+        end
+    end
+    return P.Menu(self, items, anchor)
+end
+
+P.SyncRooms = Chat._SyncRooms
+function Chat:_SyncRooms(dms, groups)
+    P.SyncRooms(self, dms, groups)
+    pcall(function()
+        local I, changed = Lib:LoadGroupIcons(), false
+        for _, g in ipairs(type(groups) == "table" and groups or {}) do
+            local gid = g.id ~= nil and tostring(g.id) or nil
+            local ic = g.icon
+            if ic == nil then ic = g.ic end
+            if gid and ic ~= nil then
+                local cur = I[gid]
+                local id, mime
+                if type(ic) == "table" and ic.id ~= nil then
+                    id, mime = tostring(ic.id), type(ic.mime) == "string" and ic.mime or "image/png"
+                elseif type(ic) == "string" and ic ~= "" then
+                    id, mime = ic, "image/png"
+                end
+                if id then
+                    if not cur or cur.id ~= id or not cur.shared then
+                        I[gid] = { id = id, mime = mime, shared = true }
+                        changed = true
+                    end
+                elseif (ic == "" or ic == false) and cur and cur.shared then
+                    I[gid] = nil
+                    changed = true
+                end
+            end
+        end
+        if changed then
+            Lib:SaveGroupIcons()
+            self:_QueueSidebar()
+        end
+    end)
+end
+
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function()
+        local I = Lib:LoadGroupIcons()
+        local cur = self.Channels[self.ChIndex]
+        local used = {}
+        for _, row in ipairs(sb.list:GetChildren()) do
+            if row.Name == "Ch" and row:IsA("TextButton") then
+                local mark, nameLbl
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("TextLabel") then
+                        if c.Text == "«" then mark = c
+                        elseif c.Position.X.Offset == 22 then nameLbl = c end
+                    end
+                end
+                if mark and nameLbl then
+                    local ch
+                    for _, c2 in ipairs(self.Channels) do
+                        if c2.kind == "grp" and not used[c2] and tostring(c2.name) == nameLbl.Text then ch = c2 break end
+                    end
+                    if ch then
+                        used[ch] = true
+                        local entry = I[tostring(ch.gid)]
+                        if entry then
+                            local img = New("ImageLabel", { Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
+                                BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, Theme = { BackgroundColor3 = "Field" }, Parent = row })
+                            Corner(img, 9)
+                            self:_IconAsset(entry, ch.room, function(a)
+                                if img.Parent then
+                                    img.Image = a
+                                    mark.Text = ""
+                                end
+                            end)
+                        end
+                        if ch == cur then
+                            local cam = New("TextButton", { Text = "", Size = UDim2.new(0, 18, 1, 0), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -20, 0, 0),
+                                ZIndex = 3, Parent = row })
+                            Lib.Icon("image", 13, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 4, Parent = cam }, "▣")
+                            cam.Activated:Connect(function() self:GroupIconMenu(ch, cam) end)
+                            Lib:AddTooltip(cam, "Group icon")
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] group icons: " .. tostring(err)) end
+end
+
+end
+-- ===================== end patch 5.1 =====================
+
+-- ===================== Aether patch 5.2 (discord menu + DM avatars) =====================
+do
+local P = {}
+Lib.Version = "5.2.0"
+
+-- ---------- discord-style popover ----------
+-- spec = { Name, Sub, Glyph, Uid, Group, Sections = { { {Text, Icon, Cb, Danger, Hint}, ... }, ... } }
+function Chat:_PopMenu(spec, anchor)
+    local W, rh, sc = 224, H(32), Lib.Scale
+    local secs = {}
+    for _, s in ipairs(spec.Sections) do if #s > 0 then secs[#secs + 1] = s end end
+    local h = 10
+    if spec.Name then h = h + 54 end
+    for i, s in ipairs(secs) do
+        if i > 1 or spec.Name then h = h + 11 end
+        h = h + #s * (rh + 2)
+    end
+    local maxH = math.max(140, (Lib.Overlay.AbsoluteSize.Y - 16) / sc)
+    local shown = math.min(h, maxH)
+    local menu = Sink(New("Frame", { Name = "ConvoMenu", Size = UDim2.fromOffset(W, shown), BackgroundTransparency = 0, ZIndex = 85,
+        Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+    Corner(menu, 8) Stroke(menu, "Stroke", 1, 0)
+    New("UIScale", { Scale = sc, Parent = menu })
+    local scroll = New("ScrollingFrame", { Size = UDim2.new(1, -8, 1, -8), Position = UDim2.fromOffset(4, 4), AutomaticCanvasSize = Y,
+        ScrollBarThickness = 2, ZIndex = 86, Parent = menu })
+    List(scroll, 2)
+    local order = 0
+
+    if spec.Name then
+        order = order + 1
+        local head = New("Frame", { Size = UDim2.new(1, 0, 0, 52), LayoutOrder = order, BackgroundTransparency = 1, ZIndex = 87, Parent = scroll })
+        local av = New("ImageLabel", { Size = UDim2.fromOffset(36, 36), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0),
+            BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, ZIndex = 88, Theme = { BackgroundColor3 = "Field" }, Parent = head })
+        Corner(av, 18)
+        local glyph = New("TextLabel", { Text = spec.Glyph or "", Font = Lib.FontBold, TextSize = 16, Size = UDim2.fromScale(1, 1), ZIndex = 89,
+            Theme = { TextColor3 = "Accent" }, Parent = av })
+        if spec.Uid then
+            GetAvatar(spec.Uid, function(u) if av.Parent then av.Image = u glyph.Text = "" end end)
+        elseif spec.Group then
+            local entry = Lib:LoadGroupIcons()[tostring(spec.Group.gid)]
+            if entry then
+                self:_IconAsset(entry, spec.Group.room, function(a) if av.Parent then av.Image = a glyph.Text = "" end end)
+            end
+        end
+        New("TextLabel", { Text = Short(tostring(spec.Name), 24), Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -62, 0, 18), Position = UDim2.fromOffset(54, 8),
+            TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 88, Parent = head })
+        New("TextLabel", { Text = spec.Sub or "", TextSize = 11, Size = UDim2.new(1, -62, 0, 14), Position = UDim2.fromOffset(54, 28),
+            TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 88, Theme = { TextColor3 = "Dim" }, Parent = head })
+    end
+
+    for i, sec in ipairs(secs) do
+        if i > 1 or spec.Name then
+            order = order + 1
+            local d = New("Frame", { Size = UDim2.new(1, 0, 0, 9), LayoutOrder = order, BackgroundTransparency = 1, ZIndex = 87, Parent = scroll })
+            New("Frame", { Size = UDim2.new(1, -12, 0, 1), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 0.35,
+                ZIndex = 88, Theme = { BackgroundColor3 = "Stroke" }, Parent = d })
+        end
+        for _, it in ipairs(sec) do
+            order = order + 1
+            local danger = it.Danger
+            local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, rh), LayoutOrder = order, BackgroundTransparency = 1, ZIndex = 87,
+                Theme = { BackgroundColor3 = danger and "Bad" or "FieldHover" }, Parent = scroll })
+            Corner(b, 5)
+            local ico = Lib.Icon(it.Icon or "circle", 16, danger and "Bad" or "SubText",
+                { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), ZIndex = 88, Parent = b })
+            New("TextLabel", { Text = it.Text, TextSize = 13, Size = UDim2.new(1, -(40 + (it.Hint and 44 or 8)), 1, 0), Position = UDim2.fromOffset(36, 0),
+                TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 88, Theme = { TextColor3 = danger and "Bad" or "Text" }, Parent = b })
+            if it.Hint then
+                New("TextLabel", { Text = tostring(it.Hint), TextSize = 11, Size = UDim2.fromOffset(36, rh), AnchorPoint = Vector2.new(1, 0),
+                    Position = UDim2.new(1, -10, 0, 0), TextXAlignment = RIGHT, ZIndex = 88, Theme = { TextColor3 = "Dim" }, Parent = b })
+            end
+            b.MouseEnter:Connect(function()
+                Tween(b, { BackgroundTransparency = danger and 0.8 or 0.3 }, 0.06)
+                if not danger then Tint(ico, Lib.Theme.Text, 0.08) end
+            end)
+            b.MouseLeave:Connect(function()
+                Tween(b, { BackgroundTransparency = 1 }, 0.08)
+                if not danger then Tint(ico, Lib.Theme.SubText, 0.1) end
+            end)
+            Press(b, function() Lib:ClosePopup() Safe(it.Cb) end)
+        end
+    end
+
+    local pos, hh = PlaceBelow(anchor, W * sc, shown * sc, 4, true)
+    menu.Size = UDim2.fromOffset(W, math.min(shown, math.max(hh / sc, 60)))
+    menu.Position = UDim2.fromOffset(pos.X, pos.Y)
+    Lib:OpenPopup(menu, function() menu:Destroy() end, anchor)
+end
+
+-- ---------- the chevron menu ----------
+P.ChannelMenu = Chat.ChannelMenu
+function Chat:ChannelMenu()
+    local cur = self.Channels[self.ChIndex]
+    if not cur then return end
+    local me = LocalPlayer.UserId
+    local S = Lib:LoadChatState()
+    local fav = S.favs[cur.room] == true
+    local pins = #(self.Pinned or {})
+    local A, B, E, C = {}, {}, {}, {}
+    local function Add(sec, text, icon, cb, o)
+        table.insert(sec, { Text = text, Icon = icon, Cb = cb, Danger = o and o.Danger, Hint = o and o.Hint })
+    end
+    local spec = { Sections = { A, B, E, C } }
+
+    if cur.kind == "grp" then
+        local owner = tonumber(cur.creator or cur.owner)
+        local isOwner = owner == nil or owner == me
+        local n = #(cur.members or {})
+        spec.Name, spec.Glyph, spec.Group = cur.name, "«", cur
+        spec.Sub = "Group chat" .. (n > 0 and (" · " .. n .. "/" .. MAX_GROUP .. " members") or "")
+        Add(A, "Invite Members", "user-plus", function() self:InviteToGroup(cur.gid) end)
+        if isOwner then Add(A, "Rename Group", "pencil", function() self:RenameGroup(cur.gid) end) end
+        Add(A, "Change Group Icon", "image", function() self:ChooseGroupIcon(cur) end)
+        if Lib:LoadGroupIcons()[tostring(cur.gid)] then
+            Add(A, "Remove Group Icon", "x", function() self:ClearGroupIcon(cur) end)
+        end
+        if isOwner then Add(A, "Make Owner", "crown", function() self:TransferOwner(cur) end) end
+        Add(C, "Leave Group", "log-out", function() self:LeaveGroup(cur) end, { Danger = true })
+    elseif cur.kind == "dm" then
+        local u = { uid = cur.uid, name = cur.name, display = cur.name }
+        local online = cur.uid and self.Friends.online[tostring(cur.uid)]
+        spec.Name, spec.Uid = cur.name, cur.uid
+        spec.Sub = "Direct message" .. (online and " · online" or "")
+        Add(A, "View Profile", "user", function() self:ShowProfile(u) end)
+        Add(A, "Invite to Group", "users", function() self:InviteToGroup(nil, { u }) end)
+        local st = cur.uid and self:FriendState(cur.uid) or nil
+        if st == nil and cur.uid then Add(A, "Add Friend", "user-plus", function() self:Friend("request", u) end)
+        elseif st == "incoming" then Add(A, "Accept Friend Request", "user-check", function() self:Friend("accept", u) end)
+        elseif st == "outgoing" then Add(A, "Cancel Friend Request", "user-x", function() self:Friend("cancel", u) end) end
+        if cur.uid then
+            local blocked = Lib:IsBlocked(cur.uid)
+            Add(C, blocked and "Unblock User" or "Block User", "ban", function()
+                if blocked then Lib:Unblock(cur.uid) else Lib:Block(cur.uid, cur.name) end
+            end, { Danger = not blocked })
+        end
+        Add(C, "Close DM", "x", function()
+            local idx = self:_RoomIndex(cur.room)
+            if idx then
+                self.HiddenDMs[cur.room] = cur.lastId or 0
+                table.remove(self.Channels, idx)
+                if self.ChIndex == idx then self.ChIndex = -1 self:SetChannel(1)
+                elseif self.ChIndex > idx then self.ChIndex = self.ChIndex - 1 self:_RefreshChannel()
+                else self:_RefreshChannel() end
+            end
+            self:SaveConvos()
+        end, { Danger = true })
+    else
+        local here = cur.id and tonumber(cur.id) == game.PlaceId
+        spec.Name, spec.Glyph = "#" .. tostring(cur.name), "#"
+        spec.Sub = "Channel" .. (here and " · current game" or "")
+    end
+
+    Add(B, "Pinned Messages", "pin", function() self:ShowPins() end, { Hint = pins > 0 and pins or nil })
+    Add(B, "Search Messages", "search", function() self:ToggleSearch(true) end)
+    Add(B, fav and "Remove Favorite" or "Mark as Favorite", "star", function() Lib:SetFav(cur.room, not fav) end)
+
+    -- no sidebar in Compact layout, so the menu is the only way to switch / start conversations
+    if not self.Wide then
+        Add(E, "Switch Conversation...", "list", function() P.ChannelMenu(self) end)
+        Add(E, "New DM...", "message-square", function()
+            self:PickUser(function(u) self:OpenDM(u.uid, u.name, u.display) end, "DM who?")
+        end)
+        Add(E, "New Group Chat...", "users", function() self:NewGroup() end)
+        local reqN = #self.Friends.incoming
+        Add(E, "Friends", "user", function() self:ShowFriends(reqN > 0 and "requests" or "friends") end, { Hint = reqN > 0 and reqN or nil })
+    end
+
+    self:_PopMenu(spec, self.ChBtn)
+end
+
+-- ---------- avatars in the header bar ----------
+function Chat:_UpdateHeaderAvatar()
+    local btn, label = self.ChBtn, self.ChLabel
+    if not (btn and label and btn.Parent) then return end
+    local ch = self.Channels[self.ChIndex]
+    local av = self._hdrAv
+    if not av then
+        av = New("ImageLabel", { Name = "HdrAvatar", Size = UDim2.fromOffset(20, 20), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 7, 0.5, 0),
+            BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, Visible = false, ZIndex = 3, Theme = { BackgroundColor3 = "Field" }, Parent = btn })
+        Corner(av, 10)
+        self._hdrAv = av
+    end
+    local g = ch ~= nil and ch.kind == "grp"
+    local entry = g and Lib:LoadGroupIcons()[tostring(ch.gid)] or nil
+    local want = ch ~= nil and ((ch.kind == "dm" and ch.uid) or entry) and true or false
+    av.Visible = want
+    local off = want and 26 or 0
+    label.Position = UDim2.fromOffset(10 + off, 0)
+    label.Size = UDim2.new(1, -((g and 56 or 30) + off), 1, 0)
+    if not want then return end
+    av.Image = ""
+    local key = ch.room .. ":" .. tostring(entry and entry.id or ch.uid)
+    self._hdrKey = key
+    local function Set(a) if av.Parent and self._hdrKey == key then av.Image = a end end
+    if ch.kind == "dm" then GetAvatar(ch.uid, Set) else self:_IconAsset(entry, ch.room, Set) end
+end
+
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+    P.RefreshChannel(self)
+    pcall(function() self:_UpdateHeaderAvatar() end)
+end
+
+-- ---------- avatars in the sidebar DM rows ----------
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function()
+        local used = {}
+        for _, row in ipairs(sb.list:GetChildren()) do
+            if row.Name == "Ch" and row:IsA("TextButton") then
+                local dot, nameLbl
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("Frame") and c.Size == UDim2.fromOffset(8, 8) then dot = c
+                    elseif c:IsA("TextLabel") and c.Position == UDim2.fromOffset(22, 0) then nameLbl = c end
+                end
+                if dot and nameLbl then
+                    local ch
+                    for _, c2 in ipairs(self.Channels) do
+                        if c2.kind == "dm" and c2.uid and not used[c2] and tostring(c2.name) == nameLbl.Text then ch = c2 break end
+                    end
+                    if ch then
+                        used[ch] = true
+                        local av = New("ImageLabel", { Name = "DmAvatar", Size = UDim2.fromOffset(20, 20), AnchorPoint = Vector2.new(0, 0.5),
+                            Position = UDim2.new(0, 4, 0.5, 0), BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, ZIndex = 2,
+                            Theme = { BackgroundColor3 = "Field" }, Parent = row })
+                        Corner(av, 10)
+                        GetAvatar(ch.uid, function(u) if av.Parent then av.Image = u end end)
+                        -- the old status dot becomes the little badge on the avatar's corner
+                        dot.Parent = av
+                        dot.AnchorPoint, dot.Position, dot.Size, dot.ZIndex = Vector2.new(1, 1), UDim2.new(1, 3, 1, 3), UDim2.fromOffset(9, 9), 4
+                        Stroke(dot, "Surface", 2, 0)
+                        nameLbl.Position = UDim2.fromOffset(30, 0)
+                        nameLbl.Size = UDim2.new(nameLbl.Size.X.Scale, nameLbl.Size.X.Offset - 8, nameLbl.Size.Y.Scale, nameLbl.Size.Y.Offset)
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] dm avatars: " .. tostring(err)) end
+end
+
+end
+-- ===================== end patch 5.2 =====================
+
+-- ===================== Aether patch 5.3 (code blocks, formatting, emoji, notif settings, join cards) =====================
+do
+local P = {}
+Lib.Version = "5.3.0"
+Lib._quiet = false
+
+-- ==================== A) notification settings storage ====================
+Lib.ChatNotif = {}
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/chatnotif.json" end
+    local function Load()
+        if loaded then return end
+        loaded = true
+        if not FsOk() then return end
+        pcall(function()
+            local p = Path()
+            if not isfile(p) then return end
+            local d = HttpService:JSONDecode(readfile(p))
+            if type(d) ~= "table" then return end
+            for k, v in pairs(d) do
+                if type(k) == "string" and (v == "mentions" or v == "none") then Lib.ChatNotif[k] = v end
+            end
+        end)
+    end
+    function Lib:GetNotif(room)
+        Load()
+        return self.ChatNotif[room] or "all"
+    end
+    function Lib:SetNotif(room, mode)
+        Load()
+        self.ChatNotif[room] = (mode == "mentions" or mode == "none") and mode or nil
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.6, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                writefile(Path(), HttpService:JSONEncode(Lib.ChatNotif))
+            end)
+        end)
+    end
+end
+
+-- toasts can be silenced for the duration of one call
+P.Notify = Lib.Notify
+function Lib:Notify(a, b, c)
+    if Lib._quiet then return end
+    return P.Notify(self, a, b, c)
+end
+
+-- ==================== B) text formatting ====================
+-- Control characters are used as temporary tokens so the original _Rich (mentions, links) can be reused.
+P.Rich = Chat._Rich
+function Chat:_Rich(text, meta)
+    text = tostring(text or "")
+    text = (text:gsub("[\1-\8\11\12\14-\31]", ""))
+    local st = {}
+    local function Stash(k, v) st[#st + 1] = { k = k, v = v } return "\2s" .. #st .. "\3" end
+    text = text:gsub("`([^`\n]+)`", function(c) return Stash("code", c) end)
+    text = text:gsub("||(.-)||", function(c)
+        if c == "" then return nil end
+        if meta then meta.hasSp = true end
+        return Stash("sp", c)
+    end)
+    local function Wrapper(pat, tag)
+        text = text:gsub(pat, function(c)
+            if c:match("^%s") or c:match("%s$") then return nil end
+            return "\2" .. tag .. "\3" .. c .. "\2/" .. tag .. "\3"
+        end)
+    end
+    Wrapper("%*%*%*(.-)%*%*%*", "BI")
+    Wrapper("%*%*(.-)%*%*", "B")
+    Wrapper("~~(.-)~~", "S")
+    Wrapper("%*([^%*]+)%*", "I")
+    local stack, okb = {}, true
+    for slash, tag in text:gmatch("\2(/?)(%a+)\3") do
+        if slash == "" then stack[#stack + 1] = tag
+        else
+            if stack[#stack] ~= tag then okb = false break end
+            stack[#stack] = nil
+        end
+    end
+    if not okb or #stack > 0 then text = text:gsub("\2/?[BIS]+\3", "") end
+
+    local s = P.Rich(self, text)
+    local TAG = { B = "<b>", ["/B"] = "</b>", I = "<i>", ["/I"] = "</i>", S = "<s>", ["/S"] = "</s>", BI = "<b><i>", ["/BI"] = "</i></b>" }
+    for _ = 1, 4 do
+        local n
+        s, n = s:gsub("\2([^\3]+)\3", function(tok)
+            if TAG[tok] then return TAG[tok] end
+            local i = tonumber(tok:match("^s(%d+)$"))
+            local e = i and st[i]
+            if not e then return "" end
+            if e.k == "code" then
+                return "<font face='Code'><mark color='#" .. Hex("Bg") .. "' transparency='0.15'>" .. Esc(e.v) .. "</mark></font>"
+            end
+            if meta and meta.spoil then
+                return "<mark color='#" .. Hex("Dim") .. "' transparency='0.65'>" .. Esc(e.v) .. "</mark>"
+            end
+            return "<font color='#" .. Hex("Dim") .. "'>" .. string.rep("█", Clamp(utf8.len(e.v) or #e.v, 3, 20)) .. "</font>"
+        end)
+        if n == 0 then break end
+    end
+    return s
+end
+
+-- renders the first text segment of a message (the whole text for normal messages)
+function Chat:_BodyText(meta)
+    local t = self:_Rich(meta.s1 ~= nil and meta.s1 or meta.txt, meta)
+    if meta.edited and meta.editBody ~= false then
+        t = t .. " <font color='#" .. Hex("Dim") .. "' size='10'>(edited)</font>"
+    end
+    return t
+end
+
+-- ==================== C) code blocks ====================
+local function ParseBlocks(txt)
+    local segs, pos = {}, 1
+    local function AddText(s)
+        s = s:gsub("^%s+", ""):gsub("%s+$", "")
+        if s ~= "" then segs[#segs + 1] = { k = "t", s = s } end
+    end
+    while true do
+        local a, b = txt:find("```", pos, true)
+        if not a then break end
+        local c, d = txt:find("```", b + 1, true)
+        if not c then break end
+        AddText(txt:sub(pos, a - 1))
+        local body = txt:sub(b + 1, c - 1)
+        local lang, code = body:match("^([%w_%+%-%.#]*)\n(.*)$")
+        if not lang then lang, code = "", body end
+        code = code:gsub("^\n+", ""):gsub("[\n%s]+$", "")
+        if code ~= "" then segs[#segs + 1] = { k = "c", lang = lang, s = code } end
+        pos = d + 1
+    end
+    AddText(txt:sub(pos))
+    return segs
+end
+
+function Chat:_WidenItem(item)
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if not bubble then return end
+    local maxCol = math.min(560, math.floor((self.Frame.Size.X.Offset - 44) * 0.8))
+    col.Size = UDim2.new(0, maxCol, 0, 0)
+    bubble.Size = UDim2.new(0, maxCol, 0, 0)
+    pcall(self._ClampItem, self, item)
+end
+
+function Chat:_ColWidth()
+    local maxCol = math.min(560, math.floor((self.Frame.Size.X.Offset - 44) * 0.8))
+    local cap = math.max(self.Frame.Size.X.Offset - (self.Wide and self.SBW or 0) - 66, 160)
+    return math.min(maxCol, cap)
+end
+
+function Chat:_CodeBlock(parent, seg, order)
+    local code = seg.s
+    local lang = seg.lang ~= "" and seg.lang:lower() or "code"
+    local w = math.max(self:_ColWidth() - 28, 100)
+    local th = math.ceil(Measure(code, 12, Enum.Font.Code, w).Y)
+    local viewH = math.min(th + 6, 190)
+    local box = New("Frame", { Name = "CodeBlock", Size = UDim2.new(1, 0, 0, viewH + 24), LayoutOrder = order, BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Bg" }, Parent = parent })
+    Corner(box, 6) Stroke(box, "Stroke", 1, 0.4)
+    New("TextLabel", { Text = Short(lang, 16), TextSize = 10, Size = UDim2.new(1, -70, 0, 20), Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = box })
+    local copy = New("TextButton", { Text = "Copy", TextSize = 11, Size = UDim2.fromOffset(46, 18), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -4, 0, 2),
+        BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field", TextColor3 = "SubText" }, Parent = box })
+    Corner(copy, 4)
+    Lib:AddTooltip(copy, "Only run code you trust")
+    local sf = New("ScrollingFrame", { Size = UDim2.new(1, -8, 0, viewH), Position = UDim2.fromOffset(4, 22), AutomaticCanvasSize = Y,
+        ScrollBarThickness = 2, ScrollingEnabled = th + 6 > 190, Parent = box })
+    New("TextLabel", { Text = code, Font = Enum.Font.Code, TextSize = 12, Size = UDim2.new(1, -4, 0, th), AutomaticSize = Y, TextXAlignment = LEFT,
+        TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, RichText = false, Theme = { TextColor3 = "Text" }, Parent = sf })
+    copy.Activated:Connect(function()
+        if type(setclipboard) == "function" then
+            setclipboard(code)
+            copy.Text = "Copied"
+            task.delay(1.2, function() if copy.Parent then copy.Text = "Copy" end end)
+        else
+            Lib:Notify({ Text = "Your executor has no clipboard function.", Type = "warn" })
+        end
+    end)
+    return box
+end
+
+function Chat:_RenderSegments(item, meta)
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if not bubble then return end
+    for _, o in ipairs(meta.extras or {}) do pcall(function() o:Destroy() end) end
+    meta.extras, meta.hasSp = {}, false
+    local function Spoiler()
+        if not meta.hasSp then return end
+        local b = New("TextButton", { Name = "SpoilerBtn", Text = meta.spoil and "Hide spoiler" or "Reveal spoiler", TextSize = 11, AutomaticSize = X,
+            Size = UDim2.fromOffset(0, H(20)), LayoutOrder = 9, BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Bg", TextColor3 = "Accent" }, Parent = bubble })
+        Corner(b, 5) Pad(b, 8, 0, 8, 0)
+        table.insert(meta.extras, b)
+        b.Activated:Connect(function() meta.spoil = not meta.spoil self:_RenderSegments(item, meta) end)
+    end
+    local txt = meta.txt
+    if not txt:find("```", 1, true) then
+        meta.s1, meta.editBody = nil, nil
+        meta.body.Visible = txt ~= ""
+        meta.body.Text = self:_BodyText(meta)
+        Spoiler()
+        return
+    end
+    local segs = ParseBlocks(txt)
+    local lastText
+    for i, s in ipairs(segs) do if s.k == "t" then lastText = i end end
+    meta.s1 = (segs[1] and segs[1].k == "t") and segs[1].s or ""
+    meta.editBody = (lastText == 1)
+    meta.body.Visible = meta.s1 ~= ""
+    meta.body.Text = meta.s1 ~= "" and self:_BodyText(meta) or ""
+    local order = 10
+    for i = 2, #segs do
+        local s = segs[i]
+        order = order + 1
+        if s.k == "t" then
+            local l = New("TextLabel", { Name = "Seg", RichText = true, Text = "", TextSize = 13, Size = UDim2.new(1, 0, 0, 14), TextXAlignment = LEFT,
+                TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = order, Parent = bubble })
+            Wrap(l)
+            local rich = self:_Rich(s.s, meta)
+            if meta.edited and i == lastText then rich = rich .. " <font color='#" .. Hex("Dim") .. "' size='10'>(edited)</font>" end
+            l.Text = rich
+            table.insert(meta.extras, l)
+        else
+            table.insert(meta.extras, self:_CodeBlock(bubble, s, order))
+        end
+    end
+    if meta.edited and not lastText then
+        order = order + 1
+        local l = New("TextLabel", { Text = "(edited)", TextSize = 10, Size = UDim2.new(1, 0, 0, 12), TextXAlignment = LEFT, LayoutOrder = order,
+            Theme = { TextColor3 = "Dim" }, Parent = bubble })
+        table.insert(meta.extras, l)
+    end
+    Spoiler()
+    self:_WidenItem(item)
+end
+
+-- ==================== D) Join me cards ====================
+local function ParseJoin(txt)
+    local t = Trim(tostring(txt or ""))
+    local place, job, pl, mx, name = t:match("^%[join|(%d+)|([%x%-]+)|(%d+)|(%d+)|([^|%]]*)%]$")
+    if not place or not job:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") then return nil end
+    return { place = tonumber(place), job = job, players = tonumber(pl) or 0, max = tonumber(mx) or 0, name = Trim(name):sub(1, 40) }
+end
+
+function Chat:_BuildJoinCard(item, meta, msg, c)
+    meta.isCard = true
+    meta.body.Visible = false
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if not bubble then return end
+    local mine = tostring(msg.uid) == tostring(LocalPlayer.UserId)
+    local who = tostring((msg.display ~= nil and msg.display ~= "") and msg.display or msg.name or "them")
+    local same = c.job == game.JobId
+    local card = New("Frame", { Name = "JoinCard", Size = UDim2.new(1, 0, 0, H(82)), LayoutOrder = 3, BackgroundTransparency = 0.35,
+        Theme = { BackgroundColor3 = "Bg" }, Parent = bubble })
+    Corner(card, 6)
+    New("Frame", { Size = UDim2.new(0, 2, 1, -10), Position = UDim2.fromOffset(5, 5), Theme = { BackgroundColor3 = "Good" }, Parent = card })
+    New("TextLabel", { Text = "JOIN ME", TextSize = 10, Size = UDim2.new(1, -20, 0, 13), Position = UDim2.fromOffset(14, 5), TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = card })
+    New("TextLabel", { Text = c.name ~= "" and c.name or "Roblox game", Font = Lib.FontBold, TextSize = 13, Size = UDim2.new(1, -20, 0, 16),
+        Position = UDim2.fromOffset(14, 18), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+    New("TextLabel", { Text = c.players .. "/" .. c.max .. " players when posted", TextSize = 11, Size = UDim2.new(1, -20, 0, 13),
+        Position = UDim2.fromOffset(14, 35), TextXAlignment = LEFT, Theme = { TextColor3 = "SubText" }, Parent = card })
+    local row = New("Frame", { Size = UDim2.new(1, -24, 0, H(24)), Position = UDim2.fromOffset(14, 52 + (H(24) - 24)), BackgroundTransparency = 1, Parent = card })
+    List(row, 6, Enum.FillDirection.Horizontal)
+    local join = New("TextButton", { Text = same and (mine and "Your server" or "In your server") or "Join", TextSize = 12, Size = UDim2.new(0.5, -3, 1, 0), LayoutOrder = 1,
+        BackgroundTransparency = same and 0.5 or 0, TextColor3 = Color3.fromRGB(12, 16, 12), Theme = { BackgroundColor3 = "Good" }, Parent = row })
+    Corner(join, 5)
+    local cp = New("TextButton", { Text = "Copy script", TextSize = 12, Size = UDim2.new(0.5, -3, 1, 0), LayoutOrder = 2, BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = row })
+    Corner(cp, 5)
+    cp.Activated:Connect(function()
+        Copy(string.format("game:GetService('TeleportService'):TeleportToPlaceInstance(%d, '%s', game.Players.LocalPlayer)", c.place, c.job), "Join script")
+    end)
+    local busy = false
+    join.Activated:Connect(function()
+        if same then Lib:Notify({ Text = "You're already in this server.", Type = "info" }) return end
+        if busy then return end
+        busy = true
+        join.Text = "Checking..."
+        local function Go() Lib:JoinServer(c.place, c.job, who) end
+        Lib:CheckServer(c.place, c.job, function(r, why)
+            busy = false
+            if join.Parent then join.Text = "Join" end
+            if r and r.max > 0 and r.playing >= r.max then
+                Lib:Dialog({ Title = "Server is full", Text = who .. "'s server is at capacity right now. A spot may open up.",
+                    Buttons = { { Text = "Cancel" }, { Text = "Try anyway", Primary = true, Callback = Go } } })
+            elseif not r and why == "notfound" then
+                Lib:Dialog({ Title = "Server not in the public list", Text = "It may have closed, or it just isn't in the first 400 servers Roblox lists. Try anyway?",
+                    Buttons = { { Text = "Cancel" }, { Text = "Try anyway", Primary = true, Callback = Go } } })
+            else
+                Go()
+            end
+        end)
+    end)
+    self:_WidenItem(item)
+end
+
+function Chat:ShareServer()
+    if game.PrivateServerId ~= "" then
+        Lib:Notify({ Title = "Join me", Text = "You're in a private server. Roblox only lets people in with an invite link, not a server id, so a card can't work here.", Type = "warn", Duration = 6 })
+        return
+    end
+    if game.JobId == "" then
+        Lib:Notify({ Title = "Join me", Text = "There's no live server to share (Studio?).", Type = "warn" })
+        return
+    end
+    Lib:Dialog({ Title = "Share your server", Text = "Post your current game and server in this chat? Anyone who sees it can join you.",
+        Buttons = { { Text = "Cancel" }, { Text = "Post", Primary = true, Callback = function()
+            task.spawn(function()
+                local ok, nm = pcall(function() return Market:GetProductInfo(game.PlaceId).Name end)
+                local name = ok and tostring(nm) or "Roblox game"
+                name = name:gsub("[|%[%]%c]", " ")
+                name = Trim(name):sub(1, 40)
+                self:Send(string.format("[join|%d|%s|%d|%d|%s]", game.PlaceId, game.JobId, #Players:GetPlayers(), Players.MaxPlayers, name))
+            end)
+        end } } })
+end
+
+-- ==================== E) message hooks ====================
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local quiet = type(msg) == "table" and (msg.type == nil or msg.type == "msg") and Lib:GetNotif(self.Room) == "none"
+    local last = self.Items[#self.Items]
+    if quiet then Lib._quiet = true end
+    local ok, res = pcall(P.AddMessage, self, msg)
+    Lib._quiet = false
+    if not ok then error(res, 0) end
+    local item = self.Items[#self.Items]
+    local meta = item and item ~= last and self.Meta[item]
+    if meta and meta.msg == msg then
+        local ok2, err = pcall(function()
+            local card = ParseJoin(meta.txt)
+            if card then self:_BuildJoinCard(item, meta, msg, card) else self:_RenderSegments(item, meta) end
+        end)
+        if not ok2 then warn("[Aether] message render: " .. tostring(err)) end
+    end
+    return res
+end
+
+P.ApplyEdit = Chat._ApplyEdit
+function Chat:_ApplyEdit(ev)
+    P.ApplyEdit(self, ev)
+    local item = self.ByLid[ev.target]
+    local meta = item and self.Meta[item]
+    if meta and not meta.isCard then pcall(self._RenderSegments, self, item, meta) end
+end
+
+-- while searching, highlight only the first text segment (the code blocks are separate objects)
+P.ApplySearch = Chat.ApplySearch
+function Chat:ApplySearch(keep)
+    local swapped = {}
+    for _, it in ipairs(self.Items) do
+        local m = self.Meta[it]
+        if m and m.s1 ~= nil then swapped[m] = m.txt m.txt = m.s1 end
+    end
+    local ok, err = pcall(P.ApplySearch, self, keep)
+    for m, t in pairs(swapped) do m.txt = t end
+    if not ok then warn("[Aether] search: " .. tostring(err)) end
+end
+
+-- ==================== F) sending: lengths, no auto-correct on code / cards ====================
+P.Send = Chat.Send
+function Chat:Send(text)
+    text = Trim(text or "")
+    if text == "" then return P.Send(self, text) end
+    local code = text:find("```", 1, true) ~= nil
+    local card = text:sub(1, 6) == "[join|"
+    local cap = code and 1500 or (card and 240 or (self._baseMax or 200))
+    local cut = #text > cap
+    text = text:sub(1, cap)
+    if code and cut and (select(2, text:gsub("```", "")) % 2 == 1) then text = text .. "\n```" end
+    local ac = Lib.ChatPrefs and Lib.ChatPrefs.AutoCorrect
+    if (code or card) and Lib.ChatPrefs then Lib.ChatPrefs.AutoCorrect = false end
+    local ok, err = pcall(P.Send, self, text)
+    if Lib.ChatPrefs then Lib.ChatPrefs.AutoCorrect = ac end
+    if not ok then error(err, 0) end
+end
+
+function Chat:CodeComposer()
+    local langBox
+    Lib:Dialog({ Title = "Send code block", Text = "Paste or type your code. People can copy it, nothing runs automatically.",
+        Extra = function(card)
+            local lf = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = 3, ZIndex = 102, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+            Corner(lf, 5) Stroke(lf, "Stroke", 1, 0.3)
+            langBox = New("TextBox", { Text = "lua", PlaceholderText = "language (optional)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12,
+                Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT, ZIndex = 103, Parent = lf })
+            local f = New("Frame", { Size = UDim2.new(1, 0, 0, 150), LayoutOrder = 3, ZIndex = 102, ClipsDescendants = true, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+            Corner(f, 5) Stroke(f, "Stroke", 1, 0.3)
+            return New("TextBox", { Text = "", PlaceholderText = "Your code...", PlaceholderColor3 = Lib.Theme.Dim, MultiLine = true, TextWrapped = false,
+                Font = Enum.Font.Code, TextSize = 12, Size = UDim2.new(1, -16, 1, -12), Position = UDim2.fromOffset(8, 6), TextXAlignment = LEFT,
+                TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 103, Parent = f })
+        end,
+        Buttons = { { Text = "Cancel" }, { Text = "Send", Primary = true, Callback = function(body)
+            body = tostring(body or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+            body = Trim(body)
+            if body == "" then return end
+            local lang = Trim(langBox and langBox.Text or ""):gsub("[^%w_%+%-%.#]", "")
+            local msg = "```" .. lang .. "\n" .. body .. "\n```"
+            if #msg > 1500 then
+                Lib:Notify({ Title = "Code block", Text = "That's too long to send (max about 1500 characters).", Type = "error" })
+                return
+            end
+            self:Send(msg)
+        end } } })
+end
+
+-- ==================== G) the + button in the input bar ====================
+function Chat:_PlusMenu(anchor)
+    self:_PopMenu({ Sections = { {
+        { Text = "Code Block...", Icon = "code", Cb = function() self:CodeComposer() end },
+        { Text = "Share My Server", Icon = "gamepad-2", Cb = function() self:ShareServer() end },
+        { Text = "Search Images", Icon = "image", Cb = function() self:PickSearch() end },
+    } } }, anchor)
+end
+
+function Chat:_InitBar()
+    local input = self.Input
+    local bar = input.Parent
+    local ih = H(32)
+    input.Size = UDim2.new(1, -(ih * 3 + 14), 1, 0)
+    local plus = IconButton(bar, "plus", "+", ih - 8, "More", "Accent", 1)
+    plus.Button.AnchorPoint, plus.Button.Position = Vector2.new(1, 0.5), UDim2.new(1, -ih * 2, 0.5, 0)
+    plus.Button.Activated:Connect(function() self:_PlusMenu(plus.Button) end)
+end
+
+-- ==================== H) emoji shortcuts ====================
+local Alias = {
+    { "joy", "😂" }, { "sob", "😭" }, { "heart", "❤️" }, { "thumbsup", "👍" }, { "+1", "👍" }, { "thumbsdown", "👎" }, { "-1", "👎" },
+    { "fire", "🔥" }, { "skull", "💀" }, { "100", "💯" }, { "pray", "🙏" }, { "clap", "👏" }, { "eyes", "👀" }, { "cry", "😢" },
+    { "smile", "😄" }, { "grin", "😁" }, { "laughing", "😆" }, { "rofl", "🤣" }, { "sunglasses", "😎" }, { "thinking", "🤔" },
+    { "wave", "👋" }, { "tada", "🎉" }, { "rocket", "🚀" }, { "sweat_smile", "😅" }, { "ok_hand", "👌" }, { "muscle", "💪" },
+    { "angry", "😠" }, { "rage", "😡" }, { "scream", "😱" }, { "poop", "💩" }, { "ghost", "👻" }, { "crown", "👑" }, { "star", "⭐" },
+    { "sparkles", "✨" }, { "zap", "⚡" }, { "check", "✅" }, { "x", "❌" }, { "clown", "🤡" }, { "nerd", "🤓" }, { "trophy", "🏆" },
+}
+local Emo = { map = {}, list = {} }
+local function BuildEmoji(l)
+    local map, list = {}, {}
+    local function Add(code, e)
+        if code ~= "" and not map[code] then map[code] = e list[#list + 1] = { code, e } end
+    end
+    for _, a in ipairs(Alias) do Add(a[1], a[2]) end
+    if l then
+        for _, x in ipairs(l) do
+            if (x.v or 0) <= Lib.EmojiMaxVersion then
+                local c = tostring(x.n or ""):gsub("[^%w%s]", "")
+                c = c:gsub("%s+", "_")
+                Add(c, x.e)
+            end
+        end
+    end
+    Emo.map, Emo.list = map, list
+end
+BuildEmoji(nil)
+
+local function EmojiLookup(part)
+    part = part:lower()
+    local out, seen = {}, {}
+    for _, it in ipairs(Emo.list) do
+        if it[1]:sub(1, #part) == part then out[#out + 1] = it seen[it[1]] = true if #out >= 6 then return out end end
+    end
+    for _, it in ipairs(Emo.list) do
+        if not seen[it[1]] and it[1]:find(part, 1, true) then out[#out + 1] = it if #out >= 6 then return out end end
+    end
+    return out
+end
+
+function Chat:_InitEmoji()
+    local input = self.Input
+    local par = (self._sb and self._sb.main) or self.Frame
+    local sug = Sink(New("Frame", { Name = "EmojiSuggest", Visible = false, Size = UDim2.new(1, -16, 0, 0), AutomaticSize = Y, AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 8, 1, -(H(32) + 14)), BackgroundTransparency = 0, ZIndex = 22, Theme = { BackgroundColor3 = "Surface" }, Parent = par }))
+    Corner(sug, 6) Stroke(sug) Pad(sug, 3, 3, 3, 3) List(sug, 0)
+    Lib:LoadEmojis(function(l) if l then BuildEmoji(l) end end)
+    local guard = false
+    local function SetText(t)
+        guard = true
+        input.Text = t
+        input.CursorPosition = #t + 1
+        guard = false
+    end
+    local function Boundary(t, s) return s == 1 or t:sub(s - 1, s - 1):match("%s") ~= nil end
+    local function Hide() sug.Visible = false end
+    input:GetPropertyChangedSignal("Text"):Connect(function()
+        if guard then return end
+        local t = input.Text
+        for _, c in ipairs(sug:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+        local s, code = t:match("()%:([%w_%+%-]+)%:$")
+        if s and Boundary(t, s) then
+            local e = Emo.map[code:lower()]
+            if e then SetText(t:sub(1, s - 1) .. e) Hide() return end
+        end
+        local s2, part = t:match("()%:([%w_%+%-]+)$")
+        if not (s2 and #part >= 2 and Boundary(t, s2)) then Hide() return end
+        local found = EmojiLookup(part)
+        if #found == 0 then Hide() return end
+        sug.Position = UDim2.new(0, 8, 1, -(self.ListBottom - 2 + (self.ReplyTo and 28 or 0) + (self.TypeOn and 18 or 0)))
+        for i, it in ipairs(found) do
+            local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, H(28)), LayoutOrder = i, ZIndex = 23, BackgroundTransparency = 1,
+                BackgroundColor3 = Lib.Theme.FieldHover, Parent = sug })
+            Corner(b, 4)
+            New("TextLabel", { Text = it[2] .. "  :" .. it[1] .. ":", TextSize = 13, Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(9, 0),
+                TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 24, Parent = b })
+            b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.3 }, 0.06) end)
+            b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+            local picked = false
+            local function Pick()
+                if picked then return end
+                picked = true
+                local cur = input.Text
+                local ns = cur:match("()%:([%w_%+%-]+)$")
+                if ns then SetText(cur:sub(1, ns - 1) .. it[2] .. " ") end
+                Hide()
+                task.defer(function() input:CaptureFocus() end)
+            end
+            b.InputBegan:Connect(function(i) if IsPress(i) then Pick() end end)
+            b.Activated:Connect(Pick)
+        end
+        sug.Visible = true
+    end)
+    input.FocusLost:Connect(function()
+        task.delay(0.3, function() if sug.Parent and not input:IsFocused() then sug.Visible = false end end)
+    end)
+end
+
+-- ==================== I) notification settings ====================
+function Chat:NotifMenu(ch)
+    local mode = Lib:GetNotif(ch.room)
+    local function Opt(text, icon, m, msg)
+        return { Text = text, Icon = icon, Hint = mode == m and "✓" or nil, Cb = function()
+            Lib:SetNotif(ch.room, m)
+            if m ~= "all" then ch.unread = 0 end
+            self:_RefreshChannel()
+            Lib:Notify({ Title = "Notifications", Text = msg, Type = "success", Duration = 3 })
+        end }
+    end
+    local label = ch.kind == "dm" and ("@" .. tostring(ch.name)) or (ch.kind == "grp" and ("«" .. tostring(ch.name) .. "»") or ("#" .. tostring(ch.name)))
+    self:_PopMenu({ Name = "Notifications", Sub = label, Glyph = "🔔", Sections = { {
+        Opt("All Messages", "bell", "all", "You'll be notified for every message in " .. label .. "."),
+        Opt("Only @mentions", "at-sign", "mentions", "Only mentions and replies in " .. label .. " will get your attention."),
+        Opt("Nothing", "bell-off", "none", label .. " is muted. No badges or popups."),
+    } } }, self.ChBtn)
+end
+
+P.PopMenu = Chat._PopMenu
+function Chat:_PopMenu(spec, anchor)
+    if anchor ~= nil and anchor == self.ChBtn and spec.Name ~= "Notifications" and spec.Sections and spec.Sections[2] then
+        local cur = self.Channels[self.ChIndex]
+        if cur then
+            local m = Lib:GetNotif(cur.room)
+            table.insert(spec.Sections[2], 1, { Text = "Notification Settings", Icon = m == "none" and "bell-off" or "bell",
+                Hint = m == "all" and "All" or (m == "mentions" and "@" or "Off"), Cb = function() self:NotifMenu(cur) end })
+        end
+    end
+    return P.PopMenu(self, spec, anchor)
+end
+
+-- DM / group unread counts arrive with every poll; zero them for muted rooms before the chat sees them
+P.SyncRooms = Chat._SyncRooms
+function Chat:_SyncRooms(dms, groups)
+    local function Filter(d, room)
+        local m = room and Lib:GetNotif(room) or "all"
+        if m == "all" then return end
+        if m == "none" then d.unread = 0 return end
+        local l = type(d.last) == "table" and d.last or nil
+        if not (l and self:_Pings(l)) then d.unread = 0 end
+    end
+    pcall(function()
+        for _, d in ipairs(type(dms) == "table" and dms or {}) do
+            local uid = tonumber(d.uid)
+            if uid then Filter(d, self:DMRoom(uid)) end
+        end
+        for _, g in ipairs(type(groups) == "table" and groups or {}) do
+            if g.id ~= nil then Filter(g, "grp:" .. tostring(g.id)) end
+        end
+    end)
+    return P.SyncRooms(self, dms, groups)
+end
+
+-- public channel "peek" requests only return a count, so a muted channel always reports 0
+P.Do = Chat._Do
+function Chat:_Do(path, query, method, body, room)
+    local res = P.Do(self, path, query, method, body, room)
+    if path == "/poll" and type(query) == "table" and query.peek and room and Lib:GetNotif(room) ~= "all" and res and res.StatusCode == 200 then
+        local d = Decode(res)
+        if d and d.ok then
+            d.count = 0
+            return { StatusCode = 200, Body = HttpService:JSONEncode(d) }
+        end
+    end
+    return res
+end
+
+-- bell-off icon + dimmed name on muted rows
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function()
+        local used = {}
+        for _, row in ipairs(sb.list:GetChildren()) do
+            if row.Name == "Ch" and row:IsA("TextButton") then
+                local nameLbl
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("TextLabel") and c.Position.X.Scale == 0 and c.Position.Y.Offset == 0
+                        and (c.Position.X.Offset == 22 or c.Position.X.Offset == 30) then nameLbl = c end
+                end
+                if nameLbl then
+                    for _, ch in ipairs(self.Channels) do
+                        if not used[ch] and tostring(ch.name) == nameLbl.Text then
+                            used[ch] = true
+                            if Lib:GetNotif(ch.room) ~= "all" then
+                                nameLbl.TextTransparency = 0.45
+                                Lib.Icon(Lib:GetNotif(ch.room) == "none" and "bell-off" or "at-sign", 11, "Dim",
+                                    { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -40, 0.5, 0), ZIndex = 3, Parent = row })
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] muted rows: " .. tostring(err)) end
+end
+
+-- ==================== J) init ====================
+function Chat:_InitP53()
+    self._baseMax = self.Config.MaxLength or 200
+    self.Config.MaxLength = 1500
+    local function Try(name, fn)
+        local ok, err = pcall(fn)
+        if not ok then warn("[Aether] " .. name .. ": " .. tostring(err)) end
+    end
+    Try("input bar", function() self:_InitBar() end)
+    Try("emoji shortcuts", function() self:_InitEmoji() end)
+    Try("rail badge", function()
+        local rb = self.PanelObj.RailButton
+        if rb and not rb._p53 then
+            rb._p53 = true
+            local orig = rb.AddBadge
+            rb.AddBadge = function(b2, ...)
+                if Lib._quiet then return end
+                return orig(b2, ...)
+            end
+        end
+    end)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p53 then
+        chat._p53 = true
+        chat:_InitP53()
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 5.3 =====================
+
 return Lib
