@@ -8,8 +8,7 @@ A full-featured Roblox UI library for script hubs. It runs on PC and mobile and 
 ## Quick start
 
 ```lua
-local Lib = loadstring(game:HttpGet("https://github.com/jaylensotufffff/aether-ui-release-v1.00/blob/main/library.lua"))()
-
+local Lib = loadstring(game:HttpGet("https://raw.githubusercontent.com/jaylensotufffff/aether-ui-release-v1.00/main/library.lua"))()
 local Window = Lib:CreateWindow({
     Title = "Aether",
     Subtitle = "My script hub",
