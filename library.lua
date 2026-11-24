@@ -15467,4 +15467,205 @@ end)
 end
 -- ===================== end patch 5.8 =====================
 
+-- ===================== Aether patch 5.9 =====================
+-- Paste this block right above the final `return Lib` (after patch 5.8).
+--
+--  1) Groups without a custom icon now show a small collage of their members' avatars
+--     (header bar, channel sidebar and the chevron menu) instead of the "«" glyph.
+--  2) The keybind list is force-hidden while the main UI is fullscreen (and while chat is fullscreen),
+--     enforced after every other script has touched it, so it can no longer flicker through.
+do
+local P = {}
+Lib.Version = "5.9.0"
+
+-- ---------- member ids of a group (numbers or {uid=...} tables), you last ----------
+local function MemberIds(ch)
+    local out, seen = {}, {}
+    local me = LocalPlayer.UserId
+    for _, m in ipairs((ch and ch.members) or {}) do
+        local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+        if id and not seen[id] then
+            seen[id] = true
+            out[#out + 1] = id
+        end
+    end
+    table.sort(out, function(a, b)
+        if (a == me) ~= (b == me) then return b == me end
+        return a < b
+    end)
+    return out
+end
+
+-- tile layouts on a 20x20 canvas: { x, y, size }
+local Layout = {
+    [1] = { { 0, 0, 20 } },
+    [2] = { { 0, 0, 13 }, { 7, 7, 13 } },
+    [3] = { { 0, 0, 11 }, { 9, 0, 11 }, { 4.5, 9, 11 } },
+    [4] = { { 0, 0, 11 }, { 9, 0, 11 }, { 0, 9, 11 }, { 9, 9, 11 } },
+}
+
+-- builds a round-avatar cluster of up to 4 members inside `parent`
+function Chat:_Collage(parent, ids, px, z)
+    local n = math.min(#ids, 4)
+    local f = New("Frame", { Name = "Collage", Size = UDim2.fromOffset(px, px), BackgroundTransparency = 1, ZIndex = z, Parent = parent })
+    if n == 0 then return f end
+    local k = px / 20
+    for i = 1, n do
+        local t = Layout[n][i]
+        local s = t[3] * k
+        local img = New("ImageLabel", { Size = UDim2.fromOffset(s, s), Position = UDim2.fromOffset(t[1] * k, t[2] * k), BackgroundTransparency = 0,
+            ScaleType = Enum.ScaleType.Crop, ZIndex = z + i, Theme = { BackgroundColor3 = "Field" }, Parent = f })
+        Corner(img, s / 2)
+        Stroke(img, "Surface", 1, 0)
+        GetAvatar(ids[i], function(u) if img.Parent then img.Image = u end end)
+    end
+    return f
+end
+
+local function Key(ids)
+    local t = {}
+    for i = 1, math.min(#ids, 4) do t[i] = ids[i] end
+    return table.concat(t, ",")
+end
+
+-- ---------- header bar ----------
+function Chat:_GroupHeader()
+    local btn, label = self.ChBtn, self.ChLabel
+    if not (btn and label and btn.Parent) then return end
+    local ch = self.Channels[self.ChIndex]
+    local ids
+    if ch and ch.kind == "grp" and not Lib:LoadGroupIcons()[tostring(ch.gid)] then
+        ids = MemberIds(ch)
+        if #ids == 0 then ids = nil end
+    end
+    if not ids then
+        if self._gcol then pcall(function() self._gcol:Destroy() end) end
+        self._gcol, self._gcKey = nil, nil
+        return
+    end
+    local key = ch.room .. ":" .. Key(ids)
+    if self._gcKey ~= key or not (self._gcol and self._gcol.Parent) then
+        if self._gcol then pcall(function() self._gcol:Destroy() end) end
+        local col = self:_Collage(btn, ids, 22, 3)
+        col.AnchorPoint, col.Position = Vector2.new(0, 0.5), UDim2.new(0, 7, 0.5, 0)
+        self._gcol, self._gcKey = col, key
+    end
+    -- drop the « ... » marks, the collage takes their place
+    label.Text = (label.Text:gsub("^<font color='#%x+'><b>«</b></font> ", ""))
+    label.Text = (label.Text:gsub("»", "", 1))
+    label.Position = UDim2.fromOffset(36, 0)
+    label.Size = UDim2.new(1, -(56 + 26), 1, 0)
+end
+
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+    P.RefreshChannel(self)
+    pcall(function() self:_GroupHeader() end)
+end
+
+-- ---------- channel sidebar ----------
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function()
+        local I = Lib:LoadGroupIcons()
+        local used = {}
+        for _, row in ipairs(sb.list:GetChildren()) do
+            if row.Name == "Ch" and row:IsA("TextButton") then
+                local mark, nameLbl
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("TextLabel") then
+                        if c.Text == "«" then mark = c
+                        elseif c.Position.X.Offset == 22 and c.Position.Y.Offset == 0 then nameLbl = c end
+                    end
+                end
+                if mark and nameLbl then
+                    local ch
+                    for _, c2 in ipairs(self.Channels) do
+                        if c2.kind == "grp" and not used[c2] and tostring(c2.name) == nameLbl.Text then ch = c2 break end
+                    end
+                    if ch then
+                        used[ch] = true
+                        local ids = (not I[tostring(ch.gid)]) and MemberIds(ch) or nil
+                        if ids and #ids > 0 then
+                            local col = self:_Collage(row, ids, 20, 2)
+                            col.AnchorPoint, col.Position = Vector2.new(0, 0.5), UDim2.new(0, 3, 0.5, 0)
+                            mark.Text = ""
+                            nameLbl.Position = UDim2.fromOffset(28, 0)
+                            nameLbl.Size = UDim2.new(nameLbl.Size.X.Scale, nameLbl.Size.X.Offset - 6, nameLbl.Size.Y.Scale, nameLbl.Size.Y.Offset)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] group collage (sidebar): " .. tostring(err)) end
+end
+
+-- ---------- chevron menu header ----------
+P.PopMenu = Chat._PopMenu
+function Chat:_PopMenu(spec, anchor)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.PopMenu(self, spec, anchor)
+    if not (spec and spec.Group) then return end
+    pcall(function()
+        if Lib:LoadGroupIcons()[tostring(spec.Group.gid)] then return end
+        local ids = MemberIds(spec.Group)
+        if #ids == 0 then return end
+        local menu
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c.Name == "ConvoMenu" then menu = c end
+        end
+        if not menu then return end
+        local av
+        for _, d in ipairs(menu:GetDescendants()) do
+            if d:IsA("ImageLabel") and d.Size == UDim2.fromOffset(36, 36) then av = d break end
+        end
+        if not av then return end
+        local g = av:FindFirstChildWhichIsA("TextLabel")
+        if g then g.Text = "" end
+        local col = self:_Collage(av, ids, 32, av.ZIndex + 1)
+        col.Position = UDim2.fromOffset(2, 2)
+    end)
+end
+
+-- ---------- keybind list: never visible while a fullscreen view is open ----------
+local BIND = "AetherHideKeybinds"
+
+local function FullscreenOpen()
+    local w, c = Lib.MainWindow, Lib.ChatObj
+    if w and w.Fullscreen then return true end
+    if c and c.Full and c.PanelObj and c.PanelObj._shown then return true end
+    return false
+end
+
+pcall(function() RunService:UnbindFromRenderStep(BIND) end)
+RunService:BindToRenderStep(BIND, Enum.RenderPriority.Last.Value, function()
+    if Lib.Unloaded then return end
+    local kl = Lib.KeybindList
+    local f = kl and kl.Frame
+    if not (f and f.Parent) then return end
+    -- also catch any other script flipping Visible back on, the moment it happens
+    if not f:GetAttribute("p59") then
+        f:SetAttribute("p59", true)
+        Lib:Connect(f:GetPropertyChangedSignal("Visible"), function()
+            if f.Visible and FullscreenOpen() then f.Visible = false end
+        end)
+    end
+    if f.Visible and FullscreenOpen() then f.Visible = false end
+end)
+
+local prevUnload = Lib.OnUnload
+Lib.OnUnload = function()
+    pcall(function() RunService:UnbindFromRenderStep(BIND) end)
+    if prevUnload then Safe(prevUnload) end
+end
+
+end
+-- ===================== end patch 5.9 =====================
+
+
 return Lib
