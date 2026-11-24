@@ -18488,4 +18488,501 @@ end
 -- ===================== end patch 6.5 =====================
 
 
+-- ===================== Aether patch 6.6 =====================
+-- Paste this block right above the final `return Lib` (after patch 6.5).
+--
+--  1) Removing a custom menu background now restores the transparency you had before (it used to stay at 40%).
+--  2) Profile cards show mutual friends (Roblox friends you share) and mutual group chats, like Discord.
+--  3) The built-in Settings tab is gone from the rail: Interface / ESP / Configs now live inside the Profile tab.
+--  4) Main menu: "Profile › Interface" breadcrumb in the header, Ctrl+F focuses the search box,
+--     Quick actions + About boxes on the Account page.
+--  5) ESP preview: backdrops, panel sizes, text size, box / skeleton thickness, health bar side,
+--     presets (Minimal / Standard / Detailed / Everything / All off) and Reset ESP.
+do
+local P = {}
+Lib.Version = "6.6.0"
+
+-- ==================== 1) background removal restores the old transparency ====================
+local preGlass, autoGlass, preLoaded = nil, nil, false
+local function PrePath() return Lib.ConfigFolder .. "/bgglass.txt" end
+
+local function LoadPre()
+    if preLoaded then return end
+    preLoaded = true
+    if not FsOk() then return end
+    pcall(function()
+        local p = PrePath()
+        if not isfile(p) then return end
+        local a, b = readfile(p):match("^([%d%.]+)|([%d%.]+)$")
+        if a and b then preGlass, autoGlass = tonumber(a), tonumber(b) end
+    end)
+end
+
+local function SavePre()
+    if not FsOk() then return end
+    pcall(function()
+        if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+        if preGlass == nil then
+            writefile(PrePath(), "")
+        else
+            writefile(PrePath(), string.format("%.3f|%.3f", preGlass, autoGlass or 0.4))
+        end
+    end)
+end
+
+-- remember what the transparency was before the background raised it
+P.BgGlass = Lib._BgGlass
+function Lib:_BgGlass()
+    LoadPre()
+    local raising = self.GlassT < 0.3
+    if raising and preGlass == nil then preGlass = self.GlassT end
+    P.BgGlass(self)
+    if raising then
+        autoGlass = self.GlassT
+        SavePre()
+    end
+end
+
+local function RestoreGlass()
+    LoadPre()
+    if preGlass == nil then return end
+    local want, auto = preGlass, autoGlass
+    preGlass, autoGlass = nil, nil
+    SavePre()
+    -- if you moved the slider yourself in the meantime, your value wins
+    if auto and math.abs(Lib.GlassT - auto) > 0.006 then return end
+    local o = Lib.Options.WinOpacity
+    if o then o:SetValue(math.floor(want * 100 + 0.5)) else Lib:SetGlass(want) end
+end
+
+P.ApplyUiBg = Lib.ApplyUiBg
+function Lib:ApplyUiBg()
+    P.ApplyUiBg(self)
+    local w = self.MainWindow
+    local on = w and w._bg and w._bg.Parent and w._bg.Visible
+    if not on then RestoreGlass() end
+end
+
+P.ApplyChatBg = Lib.ApplyChatBg
+function Lib:ApplyChatBg()
+    P.ApplyChatBg(self)
+    local c = self.ChatObj
+    if c and c._bg and not c._bg.Visible then
+        pcall(function()
+            c.List.BackgroundTransparency = 0
+            if c._sb then c._sb.card.BackgroundTransparency = 0 end
+            self:SetGlass(self.GlassT)
+        end)
+    end
+end
+
+-- ==================== 2) mutual friends + mutual groups on profile cards ====================
+local MF = { mine = nil, mineAt = 0, cache = {}, busy = {} }
+
+local function FriendMap(uid)
+    local ok, pages = pcall(function() return Players:GetFriendsAsync(uid) end)
+    if not ok or not pages then return nil end
+    local out = {}
+    for _ = 1, 6 do
+        local okp, items = pcall(function() return pages:GetCurrentPage() end)
+        if not okp or type(items) ~= "table" then break end
+        for _, f in ipairs(items) do
+            if f.Id then out[f.Id] = { uid = f.Id, name = f.Username, display = f.DisplayName } end
+        end
+        if pages.IsFinished then break end
+        if not pcall(function() pages:AdvanceToNextPageAsync() end) then break end
+    end
+    return out
+end
+
+-- Lib:MutualFriends(userId, function(list) ... end)   list = array of { uid, name, display }, or nil if Roblox wouldn't say
+function Lib:MutualFriends(uid, cb)
+    uid = tonumber(uid)
+    if not uid or uid == LocalPlayer.UserId then Safe(cb, {}) return end
+    local c = MF.cache[uid]
+    if c and os.clock() - c.t < 300 then Safe(cb, c.list) return end
+    if MF.busy[uid] then table.insert(MF.busy[uid], cb) return end
+    MF.busy[uid] = { cb }
+    task.spawn(function()
+        if not MF.mine or os.clock() - MF.mineAt > 180 then
+            MF.mine = FriendMap(LocalPlayer.UserId)
+            MF.mineAt = os.clock()
+        end
+        local theirs = FriendMap(uid)
+        local list
+        if MF.mine and theirs then
+            list = {}
+            for id, f in pairs(theirs) do
+                if MF.mine[id] then list[#list + 1] = f end
+            end
+            table.sort(list, function(a, b) return tostring(a.display or a.name):lower() < tostring(b.display or b.name):lower() end)
+            MF.cache[uid] = { t = os.clock(), list = list }
+        end
+        local w = MF.busy[uid]
+        MF.busy[uid] = nil
+        for _, f in ipairs(w or {}) do Safe(f, list) end
+    end)
+end
+
+function Chat:_MutualGroups(uid)
+    local n = 0
+    for _, ch in ipairs(self.Channels) do
+        if ch.kind == "grp" then
+            for _, m in ipairs(ch.members or {}) do
+                local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+                if id == uid then n = n + 1 break end
+            end
+        end
+    end
+    return n
+end
+
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    local ok, err = pcall(function()
+        local uid = tonumber(u.uid)
+        if not uid or uid == LocalPlayer.UserId then return end
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c:IsA("TextButton") then dim = c end
+        end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        if not card then return end
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("GuiObject") and c.LayoutOrder >= 2 then c.LayoutOrder = c.LayoutOrder + 1 end
+        end
+        local row = New("TextButton", { Name = "MutualRow", Text = "", Size = UDim2.new(1, 0, 0, H(28)), LayoutOrder = 2, BackgroundTransparency = 1, ZIndex = 102, Parent = card })
+        local lab = New("TextLabel", { Text = "Checking mutual friends...", TextSize = 12, Size = UDim2.new(1, -4, 1, 0), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 103, Theme = { TextColor3 = "SubText" }, Parent = row })
+        local groups = self:_MutualGroups(uid)
+        local listRef
+        Lib:MutualFriends(uid, function(list)
+            if not row.Parent then return end
+            listRef = list
+            local parts = {}
+            if list then
+                parts[#parts + 1] = #list .. (#list == 1 and " Mutual Friend" or " Mutual Friends")
+            else
+                parts[#parts + 1] = "Mutual friends unavailable"
+            end
+            if groups > 0 then parts[#parts + 1] = groups .. (groups == 1 and " Mutual Group" or " Mutual Groups") end
+            local x = 0
+            local k = list and math.min(#list, 3) or 0
+            if k > 0 then
+                local cl = New("Frame", { Name = "MutualAvatars", Size = UDim2.fromOffset(22 + 14 * (k - 1), 22), AnchorPoint = Vector2.new(0, 0.5),
+                    Position = UDim2.new(0, 0, 0.5, 0), BackgroundTransparency = 1, ZIndex = 103, Parent = row })
+                for i = 1, k do
+                    local img = New("ImageLabel", { Size = UDim2.fromOffset(22, 22), Position = UDim2.fromOffset((i - 1) * 14, 0), BackgroundTransparency = 0,
+                        ScaleType = Enum.ScaleType.Crop, ZIndex = 103 + i, Theme = { BackgroundColor3 = "Field" }, Parent = cl })
+                    Corner(img, 11) Stroke(img, "Bg", 2, 0)
+                    GetAvatar(list[i].uid, function(url) if img.Parent then img.Image = url end end)
+                end
+                x = 22 + 14 * (k - 1) + 8
+            end
+            lab.Position = UDim2.fromOffset(x, 0)
+            lab.Size = UDim2.new(1, -(x + 4), 1, 0)
+            lab.Text = table.concat(parts, "  ·  ")
+        end)
+        row.Activated:Connect(function()
+            if not (listRef and #listRef > 0) then return end
+            local at = row.AbsolutePosition + Vector2.new(0, row.AbsoluteSize.Y)
+            if dim.Parent then dim:Destroy() end
+            local items = { { Header = true, Text = "MUTUAL FRIENDS · " .. #listRef } }
+            for i = 1, math.min(#listRef, 40) do
+                local f = listRef[i]
+                items[#items + 1] = { Text = tostring((f.display and f.display ~= "") and f.display or f.name or f.uid), Callback = function() self:ShowProfile(f) end }
+            end
+            self:Menu(items, at)
+        end)
+    end)
+    if not ok then warn("[Aether] mutual friends: " .. tostring(err)) end
+end
+
+-- ==================== 3) settings live inside the Profile tab ====================
+local function MoveSub(sub, dst, win)
+    local src = sub.Tab
+    if src == dst then return end
+    local i = IndexOf(src.Subs, sub)
+    if i then table.remove(src.Subs, i) end
+    if src.ActiveSub == sub then src.ActiveSub = src.Subs[1] end
+    local n = #dst.Subs + 1
+    sub.Tab = dst
+    sub.Frame.Parent = dst.Stack
+    sub.Frame.LayoutOrder = n
+    sub.Frame.Visible = false
+    pcall(function() sub.Pill:Destroy() end)
+    local pill = New("TextButton", { Name = "Pill_" .. sub.Name, Text = sub.Name, TextSize = 13, Size = UDim2.fromOffset(0, H(28)), AutomaticSize = X,
+        LayoutOrder = n, Theme = { TextColor3 = "SubText" }, Parent = dst.PillHolder })
+    sub.Under = New("Frame", { Size = UDim2.new(1, 0, 0, 2), AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), BackgroundTransparency = 1,
+        Theme = { BackgroundColor3 = "Accent" }, Parent = pill })
+    sub.Pill = pill
+    pill.Activated:Connect(function() dst:SelectSub(sub) end)
+    table.insert(dst.Subs, sub)
+    sub:_SetColumns(win.OneCol)
+end
+
+function Lib:_ProfileExtras(tab, window)
+    local acc = tab.Subs[1]
+    if not acc or acc._p66 then return end
+    acc._p66 = true
+    local q = acc:AddRightGroupbox("Quick actions", { Icon = "zap" })
+    q:AddButton({ Text = "Toggle chat panel", Icon = "message-square", Func = function()
+        local p = Lib.Panels.Chat
+        if p then p.UserSet = true p:Set(not p.Enabled) else Lib:Notify({ Text = "Chat isn't loaded.", Type = "warn" }) end
+    end })
+    q:AddButton({ Text = "Toggle ESP preview", Icon = "scan-face", Func = function()
+        local p = Lib.Panels.ESPPreview
+        if p then p.UserSet = true p:Set(not p.Enabled) else Lib:Notify({ Text = "The ESP preview is turned off for this hub.", Type = "warn" }) end
+    end })
+    q:AddButton({ Text = "Chat user settings", Icon = "settings", Func = function()
+        local c = Lib.ChatObj
+        if c then c:OpenSettings() else Lib:Notify({ Text = "Chat isn't loaded.", Type = "warn" }) end
+    end })
+    q:AddButton({ Text = "Fullscreen menu", Icon = "maximize", Func = function() window:ToggleFullscreen() end })
+    local ab = acc:AddLeftGroupbox("About", { Icon = "info", Collapsible = true })
+    local h = Lib.Hub or {}
+    ab:AddStat(nil, { Text = "Hub", Default = tostring(h.Name or Lib.Name) .. ((h.Version and h.Version ~= "") and (" v" .. h.Version) or "") })
+    ab:AddStat(nil, { Text = "Aether", Default = "v" .. tostring(Lib.Version) })
+    ab:AddStat(nil, { Text = "Menu key", Default = KeyName(Lib.ToggleKey) })
+    ab:AddStat(nil, { Text = "Search", Default = "Ctrl + F" })
+end
+
+-- ==================== 4) ESP preview upgrades ====================
+for _, n in ipairs({ "TextSize", "BoxThickness", "SkeletonThickness", "HealthSide" }) do ESPOptionNames[n] = true end
+
+function ESP:SetBackdrop(name)
+    name = name or "Theme"
+    self.Config.Backdrop = name
+    local body = self.Body
+    if not (body and body.Parent) then return end
+    if not self._bdGrad then
+        self._bdGrad = New("UIGradient", { Rotation = 90, Enabled = false, Parent = body })
+    end
+    if not self._bdGrid then
+        local g = New("Frame", { Name = "BackdropGrid", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Visible = false, Parent = body })
+        for i = 1, 9 do
+            New("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.fromScale(i / 10, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 0.93, ZIndex = 0, Parent = g })
+            New("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromScale(0, i / 10), BackgroundColor3 = WHITE, BackgroundTransparency = 0.93, ZIndex = 0, Parent = g })
+        end
+        self._bdGrid = g
+    end
+    local grad, grid = self._bdGrad, self._bdGrid
+    grad.Enabled, grid.Visible = false, false
+    if name == "Dark" then
+        body.BackgroundColor3 = Color3.fromRGB(8, 8, 11)
+    elseif name == "Light" then
+        body.BackgroundColor3 = Color3.fromRGB(222, 226, 234)
+    elseif name == "Sky" then
+        body.BackgroundColor3 = WHITE
+        grad.Color = ColorSequence.new(Color3.fromRGB(70, 120, 210), Color3.fromRGB(200, 225, 248))
+        grad.Enabled = true
+    elseif name == "Sunset" then
+        body.BackgroundColor3 = WHITE
+        grad.Color = ColorSequence.new(Color3.fromRGB(60, 40, 110), Color3.fromRGB(240, 140, 110))
+        grad.Enabled = true
+    elseif name == "Grid" then
+        body.BackgroundColor3 = Color3.fromRGB(8, 8, 11)
+        grid.Visible = true
+    else
+        body.BackgroundColor3 = Lib.Theme.Surface
+    end
+end
+
+local SizeModes = { Small = { 250, 380 }, Medium = { 280, 420 }, Large = { 360, 540 } }
+function ESP:SetSizeMode(name)
+    local s = SizeModes[name] or SizeModes.Medium
+    local panel = self.PanelObj
+    local vp, sc = GetViewport(), Lib.Scale
+    local w, h = math.min(s[1], (vp.X - 8) / sc), math.min(s[2], (vp.Y - 8) / sc)
+    panel.W, panel.H = w, h
+    if panel.Moved then self.Frame.Size = UDim2.fromOffset(w, h) else Lib:_Place(panel) end
+    self:_Layout()
+end
+
+-- the original _Step runs first, then the new options are applied on top of what it drew
+local function Post(self)
+    local cfg = self.Config
+    local bt, st, ts = cfg.BoxThickness or 1.5, cfg.SkeletonThickness or 1.5, cfg.TextSize or 12
+    self.BoxStroke.Thickness = bt
+    local t = math.max(1, math.floor(bt + 0.5))
+    for i, c in ipairs(self.Corners) do
+        if i % 2 == 1 then c.Size = UDim2.fromOffset(c.Size.X.Offset, t) else c.Size = UDim2.fromOffset(t, c.Size.Y.Offset) end
+    end
+    for _, l in ipairs(self.Lines) do
+        if l.Visible then l.Size = UDim2.fromOffset(l.Size.X.Offset, st) end
+    end
+    for _, l in ipairs({ self.NameLabel, self.DistLabel, self.ToolLabel }) do
+        l.TextSize = ts
+        l.Size = UDim2.fromOffset(0, ts + 5)
+    end
+    self.DistLabel.Position = UDim2.new(0.5, 0, 1, 5)
+    self.ToolLabel.Position = UDim2.new(0.5, 0, 1, cfg.Distance and (ts + 13) or 5)
+    self.HealthText.TextSize = math.max(8, ts - 2)
+    self.FlagsLabel.TextSize = math.max(8, ts - 2)
+    if cfg.HealthSide == "Right" then
+        self.HealthBack.Position = UDim2.new(1, 5, 0, -2)
+        self.HealthText.AnchorPoint = Vector2.new(0, 0)
+        self.HealthText.Position = UDim2.new(1, 11, 0, 0)
+        self.HealthText.TextXAlignment = LEFT
+        self.FlagsLabel.Position = UDim2.new(1, cfg.Health and 44 or 7, 0, 0)
+    else
+        self.HealthBack.Position = UDim2.new(0, -9, 0, -2)
+        self.HealthText.AnchorPoint = Vector2.new(1, 0)
+        self.HealthText.Position = UDim2.new(0, -12, 0, 0)
+        self.HealthText.TextXAlignment = RIGHT
+        self.FlagsLabel.Position = UDim2.new(1, 7, 0, 0)
+    end
+end
+
+P.Step = ESP._Step
+function ESP:_Step(dt)
+    P.Step(self, dt)
+    if not (self.Alive and self.Frame.Visible) then return end
+    pcall(Post, self)
+end
+
+-- re-apply a non-theme backdrop after a theme change (the body is theme-registered)
+P.SetThemeColor = Lib.SetThemeColor
+function Lib:SetThemeColor(key, color)
+    P.SetThemeColor(self, key, color)
+    local pv = self.Preview
+    if pv and pv.SetBackdrop and pv.Config and pv.Config.Backdrop and pv.Config.Backdrop ~= "Theme" then
+        pcall(pv.SetBackdrop, pv, pv.Config.Backdrop)
+    end
+end
+
+local ESPKeys = { "ESPBox", "ESPBoxFill", "ESPName", "ESPHealth", "ESPDist", "ESPTool", "ESPSkeleton", "ESPFlags", "ESPChams", "ESPTracer", "ESPHeadDot" }
+local Presets = {
+    Off = {},
+    Minimal = { ESPBox = true, ESPName = true },
+    Standard = { ESPBox = true, ESPName = true, ESPHealth = true, ESPDist = true },
+    Detailed = { ESPBox = true, ESPName = true, ESPHealth = true, ESPDist = true, ESPTool = true, ESPSkeleton = true, ESPFlags = true },
+    Everything = { ESPBox = true, ESPBoxFill = true, ESPName = true, ESPHealth = true, ESPDist = true, ESPTool = true, ESPSkeleton = true,
+        ESPFlags = true, ESPChams = true, ESPTracer = true, ESPHeadDot = true },
+}
+
+function Lib:ESPPreset(name)
+    local p = Presets[name]
+    if not p then return false end
+    for _, k in ipairs(ESPKeys) do
+        local t = self.Toggles[k]
+        if t then t:SetValue(p[k] == true) end
+    end
+    return true
+end
+
+function Lib:ESPReset()
+    for k, o in pairs(self.Options) do
+        if (k:sub(1, 3) == "ESP" or k:sub(1, 7) == "Preview") and o._def ~= nil and not tostring(k):find("^__") then
+            pcall(function()
+                if o.Type == "ColorPicker" then o:SetRainbow(false) end
+                o:SetValue(o._def)
+            end)
+        end
+    end
+end
+
+local function ExtendESP(tab)
+    local sub
+    for _, s in ipairs(tab.Subs) do if s.Name == "ESP" then sub = s end end
+    local pv = Lib.Preview
+    if not (sub and pv) then return end
+    local function Opt(n) return function(v) if Lib.Preview then Lib.Preview:SetOption(n, v) end end end
+
+    local L = sub:AddRightGroupbox("Preview Look", { Icon = "palette", Collapsible = true })
+    L:AddDropdown("PreviewBackdrop", { Text = "Backdrop", Values = { "Theme", "Dark", "Light", "Sky", "Sunset", "Grid" }, Default = 1,
+        Callback = function(v) if Lib.Preview then Lib.Preview:SetBackdrop(v) end end })
+    L:AddSegmented("PreviewSize", { Text = "Panel size", Values = { "Small", "Medium", "Large" }, Default = 2,
+        Callback = function(v) if Lib.Preview then Lib.Preview:SetSizeMode(v) end end })
+    L:AddSlider("ESPTextSize", { Text = "Text size", Min = 9, Max = 18, Default = 12, Rounding = 0, Callback = Opt("TextSize") })
+    L:AddSlider("ESPBoxThickness", { Text = "Box thickness", Min = 1, Max = 4, Default = 1.5, Rounding = 1, Callback = Opt("BoxThickness") })
+    L:AddSlider("ESPSkelThickness", { Text = "Skeleton thickness", Min = 1, Max = 4, Default = 1.5, Rounding = 1, Callback = Opt("SkeletonThickness") })
+    L:AddSegmented("ESPHealthSide", { Text = "Health bar side", Values = { "Left", "Right" }, Default = 1, Callback = Opt("HealthSide") })
+
+    local Pr = sub:AddRightGroupbox("Presets", { Icon = "sparkles", Collapsible = true })
+    local function Go(n) return function() Lib:ESPPreset(n) end end
+    Pr:AddButtonRow({ { Text = "Minimal", Func = Go("Minimal") }, { Text = "Standard", Func = Go("Standard") } })
+    Pr:AddButtonRow({ { Text = "Detailed", Func = Go("Detailed") }, { Text = "Everything", Func = Go("Everything") } })
+    Pr:AddButtonRow({ { Text = "All off", Func = Go("Off") }, { Text = "Reset ESP", Func = function()
+        Lib:ESPReset()
+        Lib:Notify({ Title = "ESP", Text = "All ESP options are back to default.", Type = "success", Duration = 2.5 })
+    end } })
+
+    for k, v in pairs({ TextSize = 12, BoxThickness = 1.5, SkeletonThickness = 1.5, HealthSide = "Left" }) do pv:SetOption(k, v) end
+    pv:SetBackdrop("Theme")
+end
+
+-- ==================== 5) main menu: breadcrumb, Ctrl+F, build hook ====================
+P.UpdateSub = Window._UpdateSub
+function Window:_UpdateSub()
+    P.UpdateSub(self)
+    local tab = self.ActiveTab
+    if tab and #tab.Subs > 1 and tab.ActiveSub then
+        self.TitleLabel.Text = tab.Name .. "  ›  " .. tab.ActiveSub.Name
+    end
+end
+
+P.SelectSub = Tab.SelectSub
+function Tab:SelectSub(sub)
+    P.SelectSub(self, sub)
+    local w = self.Window
+    if w and w.ActiveTab == self and w._UpdateSub then pcall(w._UpdateSub, w) end
+end
+
+Lib:Connect(UIS.InputBegan, function(i)
+    if i.KeyCode ~= Enum.KeyCode.F then return end
+    if not (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then return end
+    if UIS:GetFocusedTextBox() then return end
+    local w = Lib.MainWindow
+    if not (w and w.SearchBox and Lib.Visible and not w.Minimized) then return end
+    if Lib.ChatObj and Lib.ChatObj.Full and Lib.ChatObj.PanelObj and Lib.ChatObj.PanelObj._shown then return end
+    task.defer(function()
+        local box = w.SearchBox
+        pcall(function() box:CaptureFocus() end)
+        task.wait()
+        if box.Text == "f" or box.Text == "F" then box.Text = "" end
+    end)
+end)
+
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    window = window or self.MainWindow
+    if window._p66 then return window.ProfileTab end
+    local tab = P.BuildSettingsTab(self, window)
+    window._p66 = true
+    local ok, err = pcall(function()
+        if not window.ProfileTab then window.ProfileTab = Lib:_BuildProfile(window) end
+        local dst = window.ProfileTab
+        pcall(Lib._ProfileExtras, Lib, dst, window)
+        pcall(ExtendESP, tab)
+        local subs = {}
+        for _, s in ipairs(tab.Subs) do subs[#subs + 1] = s end
+        for _, s in ipairs(subs) do MoveSub(s, dst, window) end
+        -- Server goes last: Account, Interface, ESP, Configs, Server
+        local server
+        for _, s in ipairs(dst.Subs) do if s.Name == "Server" then server = s end end
+        if server then
+            server.Frame.LayoutOrder = 99
+            server.Pill.LayoutOrder = 99
+        end
+        local lay = dst.PillHolder:FindFirstChildOfClass("UIListLayout")
+        if lay then lay.Padding = UDim.new(0, 14) end
+        -- the Settings rail button is gone: everything is under Profile now
+        tab.Hidden = true
+        if tab.Rail and tab.Rail.Button then tab.Rail.Button.Visible = false end
+        if window.ActiveTab == dst then window:_UpdateSubBar() end
+        for _, d in ipairs(window.Side:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text == "Profile & server" then d.Text = "Profile & settings" end
+        end
+    end)
+    if not ok then warn("[Aether] profile / settings merge: " .. tostring(err)) end
+    return window.ProfileTab or tab
+end
+
+end
+-- ===================== end patch 6.6 =====================
+
 return Lib
