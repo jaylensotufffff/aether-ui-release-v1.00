@@ -13670,4 +13670,313 @@ end
 end
 -- ===================== end patch 5.3 =====================
 
+-- ===================== Aether patch 5.4 =====================
+do
+local P = {}
+Lib.Version = "5.4.0"
+local CODE_MAX = 10000
+
+-- ---------- 1) sizing ----------
+function Lib:_Metrics()
+        local vp = GetViewport()
+        local scale, w, h
+        if self.Touch then
+                scale = Clamp(math.min(vp.X / 820, vp.Y / 470), 0.65, 1)
+                w = Clamp(vp.X * 0.82 / scale, 440, 780)
+                h = Clamp(vp.Y * 0.86 / scale, 270, 500)
+        else
+                -- 1920x1080 = 1.0x. Smaller screens shrink down to 0.8x, big ones grow up to 1.4x.
+                scale = Clamp(math.min(vp.X / 1920, vp.Y / 1080), 0.8, 1.4)
+                w = Clamp(vp.X * 0.42 / scale, 560, 800)
+                h = Clamp(vp.Y * 0.60 / scale, 380, 540)
+        end
+        return scale, w, h
+end
+
+-- fullscreen used to raise the scale up to 1.5x, which felt huge on a normal monitor
+function Lib:_SetFsScale(key, on)
+        self._fsUsers = self._fsUsers or {}
+        local had = next(self._fsUsers) ~= nil
+        if on then
+                if not had then self._fsBase = self.Scale end
+                self._fsUsers[key] = true
+                local vp = GetViewport()
+                local want = Clamp(math.min(vp.X / 1280, vp.Y / 720), self._fsBase or self.Scale, 1.25)
+                if math.abs(want - self.Scale) > 0.001 then self:_ApplyScale(want) end
+        else
+                self._fsUsers[key] = nil
+                if next(self._fsUsers) == nil and self._fsBase then
+                        local b = self._fsBase
+                        self._fsBase = nil
+                        if math.abs(b - self.Scale) > 0.001 then self:_ApplyScale(b) end
+                end
+        end
+end
+
+-- ---------- 2) code blocks up to 10k characters ----------
+P.Send = Chat.Send
+function Chat:Send(text)
+        text = Trim(text or "")
+        if #text > 1500 and text:find("```", 1, true) then
+                if self.Blocked then return end
+                if os.clock() - self.LastSend < 0.8 then self:System("Slow down a little.") return end
+                if #text > CODE_MAX then
+                        text = text:sub(1, CODE_MAX - 4)
+                        if select(2, text:gsub("```", "")) % 2 == 1 then text = text .. "\n```" end
+                end
+                self.LastSend = os.clock()
+                local replyId = self.ReplyTo and self.ReplyTo.id or nil
+                self:SetReply(nil)
+                self.Stick = true
+                task.spawn(function()
+                        local res = self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = text, replyTo = replyId }))
+                        local d = Decode(res)
+                        if not res or res.StatusCode ~= 200 then self:System((d and d.error) or "Couldn't send.") return end
+                        self:_PollOnce()
+                end)
+                return
+        end
+        return P.Send(self, text)
+end
+
+function Chat:CodeComposer()
+        local langBox
+        Lib:Dialog({ Title = "Send code block", Text = "Paste or type your code (up to " .. CODE_MAX .. " characters). People can copy it, nothing runs automatically.",
+                Extra = function(card)
+                        local lf = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = 3, ZIndex = 102, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+                        Corner(lf, 5) Stroke(lf, "Stroke", 1, 0.3)
+                        langBox = New("TextBox", { Text = "lua", PlaceholderText = "language (optional)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12,
+                                Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT, ZIndex = 103, Parent = lf })
+                        local f = New("Frame", { Size = UDim2.new(1, 0, 0, 180), LayoutOrder = 3, ZIndex = 102, ClipsDescendants = true, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+                        Corner(f, 5) Stroke(f, "Stroke", 1, 0.3)
+                        return New("TextBox", { Text = "", PlaceholderText = "Your code...", PlaceholderColor3 = Lib.Theme.Dim, MultiLine = true, TextWrapped = false,
+                                Font = Enum.Font.Code, TextSize = 12, Size = UDim2.new(1, -16, 1, -12), Position = UDim2.fromOffset(8, 6), TextXAlignment = LEFT,
+                                TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 103, Parent = f })
+                end,
+                Buttons = { { Text = "Cancel" }, { Text = "Send", Primary = true, Callback = function(body)
+                        body = tostring(body or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+                        body = Trim(body)
+                        if body == "" then return end
+                        local lang = Trim(langBox and langBox.Text or ""):gsub("[^%w_%+%-%.#]", "")
+                        local msg = "```" .. lang .. "\n" .. body .. "\n```"
+                        if #msg > CODE_MAX then
+                                Lib:Notify({ Title = "Code block", Text = "That's too long to send (max " .. CODE_MAX .. " characters).", Type = "error" })
+                                return
+                        end
+                        self:Send(msg)
+                end } } })
+end
+
+-- ---------- 3) "+" menu: Share Config instead of Search Images ----------
+function Chat:ConfigShareMenu(anchor)
+        local function Go(name, data) self:ShareConfig(name, data) end
+        local items = { { Text = "Current Settings", Icon = "sliders-horizontal", Cb = function()
+                local o = Lib.Options.__ConfigName
+                local nm = Sanitize(o and o.Value or "")
+                if nm == "" then nm = "Shared config" end
+                Go(nm, Lib:SerializeConfig())
+        end } }
+        local saved = {}
+        for i, n in ipairs(Lib:ListConfigs()) do
+                if i > 20 then break end
+                table.insert(saved, { Text = Short(n, 22), Icon = "file", Cb = function()
+                        local ok, raw = pcall(function() return readfile(CPath(n)) end)
+                        local dec, d = false, nil
+                        if ok then dec, d = pcall(HttpService.JSONDecode, HttpService, raw) end
+                        if dec and type(d) == "table" then Go(n, d)
+                        else Lib:Notify({ Title = "Config", Text = "Couldn't read that config.", Type = "error" }) end
+                end })
+        end
+        self:_PopMenu({ Name = "Share a config", Sub = "to this chat", Glyph = "C", Sections = { items, saved } }, anchor)
+end
+
+function Chat:_PlusMenu(anchor)
+        self:_PopMenu({ Sections = { {
+                { Text = "Code Block...", Icon = "code", Cb = function() self:CodeComposer() end },
+                { Text = "Share My Server", Icon = "gamepad-2", Cb = function() self:ShareServer() end },
+                { Text = "Share Config...", Icon = "share-2", Cb = function() self:ConfigShareMenu(anchor) end },
+        } } }, anchor)
+end
+
+-- ---------- 4) mobile: hold a message to open its menu (tap does nothing) ----------
+P.OpenMessageMenu = Chat.OpenMessageMenu
+function Chat:OpenMessageMenu(msg, touch)
+        if touch == true and msg and msg.id then
+                -- the long-press handler stamps the item right before it calls us; a plain tap never does
+                local item = self.ByLid[msg.id]
+                if not (item and os.clock() - (item:GetAttribute("lp") or -10) < 0.6) then return end
+        end
+        return P.OpenMessageMenu(self, msg, touch)
+end
+
+-- ---------- 5) new-messages bar + unread badges ----------
+P.UpdateNewBar = Chat._UpdateNewBar
+function Chat:_UpdateNewBar()
+        local bar, div = self.NewBar, self._div
+        if not bar then return end
+        if self._barDone or not (div and div.Parent) then bar.Visible = false return end
+        local lp, ls = self.List.AbsolutePosition, self.List.AbsoluteSize
+        local dy = div.AbsolutePosition.Y
+        if self.Loaded and dy + div.AbsoluteSize.Y >= lp.Y + 6 and dy <= lp.Y + ls.Y then
+                -- the divider has been on screen: you've seen where the new messages start
+                self._barDone = true
+                bar.Visible = false
+                return
+        end
+        return P.UpdateNewBar(self)
+end
+
+P.PlaceDivider = Chat._PlaceDivider
+function Chat:_PlaceDivider(item)
+        P.PlaceDivider(self, item)
+        self._barDone = false
+end
+
+-- DMs / groups: ignore the server's unread count when the last message is one you've already seen
+P.SyncRooms = Chat._SyncRooms
+function Chat:_SyncRooms(dms, groups)
+        pcall(function()
+                local S = Lib:LoadChatState()
+                local function Seen(room, d)
+                        local l = type(d.last) == "table" and tonumber(d.last.id) or nil
+                        if not l then return end
+                        local ch = self:_FindRoom(room)
+                        local read = math.max(ch and tonumber(ch.read) or 0, S.reads[room] or 0)
+                        if l <= read then d.unread = 0 end
+                end
+                for _, d in ipairs(type(dms) == "table" and dms or {}) do
+                        local uid = tonumber(d.uid)
+                        if uid then Seen(self:DMRoom(uid), d) end
+                end
+                for _, g in ipairs(type(groups) == "table" and groups or {}) do
+                        if g.id ~= nil then Seen("grp:" .. tostring(g.id), g) end
+                end
+        end)
+        return P.SyncRooms(self, dms, groups)
+end
+
+-- ---------- 6) avatars in every people list ----------
+function Chat:PeopleBrowser(o)
+        local z, rh = o.Z or 90, H(34)
+        local root = New("Frame", { Size = o.Size, Position = o.Position or UDim2.new(), BackgroundTransparency = 1, ZIndex = z, Parent = o.Parent })
+        local sb = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), BackgroundTransparency = 0, ZIndex = z, Theme = { BackgroundColor3 = "Field" }, Parent = root })
+        Corner(sb, 5)
+        local box = New("TextBox", { Text = "", PlaceholderText = o.Placeholder or "Search name or @username...", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12,
+                Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT, ZIndex = z + 1, Parent = sb })
+        local scopes = o.Scopes or { { "online", "Online" }, { "all", "Everyone" } }
+        local state = { scope = o.Scope or scopes[1][1], q = "", offset = 0, gen = 0, rows = {}, tick = 0 }
+        local chipBar = New("Frame", { Size = UDim2.new(1, 0, 0, H(22)), Position = UDim2.fromOffset(0, H(26) + 4), BackgroundTransparency = 1, ZIndex = z, Parent = root })
+        List(chipBar, 4, Enum.FillDirection.Horizontal)
+        local top = H(26) + 4 + H(22) + 6
+        local info = New("TextLabel", { Text = "", TextSize = 10, Size = UDim2.new(1, 0, 0, 12), Position = UDim2.fromOffset(0, top), TextXAlignment = LEFT, ZIndex = z,
+                Theme = { TextColor3 = "Dim" }, Parent = root })
+        local list = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, -(top + 14)), Position = UDim2.fromOffset(0, top + 14), AutomaticCanvasSize = Y, ScrollBarThickness = 2, ZIndex = z, Parent = root })
+        List(list, 2)
+        local chips, Load = {}, nil
+        local function StyleChips()
+                for s, b in pairs(chips) do
+                        local on = s == state.scope
+                        b.BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Field
+                        b.TextColor3 = on and Lib.KnobOn() or Lib.Theme.SubText
+                end
+        end
+        for i, sc in ipairs(scopes) do
+                local b = New("TextButton", { Text = sc[2], TextSize = 11, AutomaticSize = X, Size = UDim2.fromOffset(0, H(22)), LayoutOrder = i, BackgroundTransparency = 0, ZIndex = z + 1, Parent = chipBar })
+                Corner(b, 11) Pad(b, 10, 0, 10, 0)
+                chips[sc[1]] = b
+                b.Activated:Connect(function() state.scope = sc[1] StyleChips() Load(false) end)
+        end
+        local function Refresh()
+                for _, r in ipairs(state.rows) do
+                        r.check.Visible = o.Mark ~= nil and o.Mark(r.u) == true
+                        r.extra.Text = o.Extra and tostring(o.Extra(r.u) or "") or ""
+                end
+        end
+        local function AddRow(u, order)
+                local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, rh), LayoutOrder = order, ZIndex = z + 1, BackgroundTransparency = 1, BackgroundColor3 = Lib.Theme.FieldHover, Parent = list })
+                Corner(b, 4)
+                local av = New("ImageLabel", { Size = UDim2.fromOffset(24, 24), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 6, 0.5, 0),
+                        BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, ZIndex = z + 2, Theme = { BackgroundColor3 = "Field" }, Parent = b })
+                Corner(av, 12)
+                local uid = tonumber(u.uid)
+                if uid then GetAvatar(uid, function(url) if av.Parent then av.Image = url end end) end
+                local dot = New("Frame", { Size = UDim2.fromOffset(9, 9), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 3, 1, 3), ZIndex = z + 3,
+                        BackgroundColor3 = u.online and Lib.Theme.Good or Lib.Theme.Dim, Parent = av })
+                Corner(dot, 5) Stroke(dot, "Surface", 2, 0)
+                New("TextLabel", { RichText = true, Text = RichEsc(u.display or u.name) .. " <font color='#" .. ToHex(Lib.Theme.Dim) .. "'>@" .. RichEsc(u.name) .. "</font>",
+                        TextSize = 12, Size = UDim2.new(1, -112, 1, 0), Position = UDim2.fromOffset(38, 0), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = z + 2, Parent = b })
+                local extra = New("TextLabel", { Text = "", TextSize = 10, Size = UDim2.fromOffset(60, rh), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -24, 0, 0),
+                        TextXAlignment = RIGHT, ZIndex = z + 2, Theme = { TextColor3 = "Dim" }, Parent = b })
+                local check = New("TextLabel", { Text = "✓", Font = Lib.FontBold, TextSize = 13, Size = UDim2.fromOffset(18, rh), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -4, 0, 0),
+                        ZIndex = z + 2, Visible = false, Theme = { TextColor3 = "Accent" }, Parent = b })
+                b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.35 }, 0.06) end)
+                b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+                Press(b, function() if o.OnClick then o.OnClick(u, Refresh) end end)
+                table.insert(state.rows, { u = u, extra = extra, check = check })
+        end
+        Load = function(append)
+                state.gen = state.gen + 1
+                local gen = state.gen
+                if not append then
+                        state.offset = 0
+                        for _, c in ipairs(list:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
+                        state.rows = {}
+                        info.Text = "Searching..."
+                else
+                        local mb = list:FindFirstChild("More")
+                        if mb then mb:Destroy() end
+                end
+                task.spawn(function()
+                        local d = Decode(self:_Do("/users", { q = state.q, scope = state.scope, offset = state.offset, limit = 30 }))
+                        if gen ~= state.gen or not root.Parent then return end
+                        if not (d and d.ok) then info.Text = (d and d.error) or "Couldn't load people. Is your worker updated?" return end
+                        local users = d.users or {}
+                        local n0 = #state.rows
+                        for i, u in ipairs(users) do
+                                if not (o.Exclude and o.Exclude[tostring(u.uid)]) then AddRow(u, n0 + i) end
+                        end
+                        state.offset = state.offset + #users
+                        local total = tonumber(d.total) or #users
+                        local what = state.scope == "online" and " online" or (state.scope == "friends" and " friends" or " people")
+                        info.Text = total == 0 and "No one found" or (total .. what .. (state.q ~= "" and " matching" or ""))
+                        if state.offset < total then
+                                local more = New("TextButton", { Name = "More", Text = "Show more (" .. (total - state.offset) .. ")", TextSize = 11, Size = UDim2.new(1, 0, 0, rh),
+                                        LayoutOrder = 100000, ZIndex = z + 1, Theme = { TextColor3 = "Accent" }, Parent = list })
+                                more.Activated:Connect(function() Load(true) end)
+                        end
+                        Refresh()
+                end)
+        end
+        box:GetPropertyChangedSignal("Text"):Connect(function()
+                state.tick = state.tick + 1
+                local t = state.tick
+                task.delay(0.3, function()
+                        if t == state.tick and root.Parent then state.q = Trim(box.Text) Load(false) end
+                end)
+        end)
+        StyleChips()
+        Load(false)
+        return { Root = root, Reload = function() Load(false) end, Refresh = Refresh, Box = box }
+end
+
+-- ---------- hooks ----------
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+        local chat = P.CreateChat(self, cfg)
+        if chat and not chat._p54 then
+                chat._p54 = true
+                chat.Config.MaxLength = CODE_MAX
+                if chat.NewBar then
+                        chat.NewBar.Activated:Connect(function()
+                                chat._barDone = true
+                                chat.NewBar.Visible = false
+                        end)
+                end
+        end
+        return chat
+end
+
+end
+-- ===================== end patch 5.4 =====================
+
 return Lib
