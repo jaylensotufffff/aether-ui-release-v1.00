@@ -15667,5 +15667,461 @@ end
 end
 -- ===================== end patch 5.9 =====================
 
+-- ===================== Aether patch 6.0: forward messages =====================
+-- Paste this block right above the final `return Lib` (after patch 5.9).
+--
+--  Right-click (PC) or long-press (mobile) a message -> Forward. A Discord-style picker lets you tick up to 5 chats
+--  (channels, DMs, group chats, friends, or anyone by username), add an optional message, and send.
+--  Works for text and images. Uses only relay endpoints the script already calls, so the relay needs no changes.
+do
+local P = {}
+Lib.Version = "6.0.0"
+P.FWD = "↪ Forwarded from "
+P.MAX = 5
+
+-- ---------- forwarded text: first line "↪ Forwarded from Name · #channel", then the original text ----------
+function P.Parse(txt)
+    local line, rest = tostring(txt or ""):match("^↪ Forwarded from ([^\n]*)\n?(.*)$")
+    if not line then return nil end
+    local who, where = line:match("^(.-) · (.+)$")
+    if not who then who, where = line, "" end
+    return who, where, rest
+end
+
+-- one line, no control characters, at most n characters
+function P.Clean(s, n)
+    s = tostring(s or ""):gsub("%c", " ")
+    s = Trim(s):gsub("%s+", " ")
+    local len = utf8.len(s)
+    if len and len > n then
+        s = s:sub(1, utf8.offset(s, n + 1) - 1)
+    elseif not len then
+        s = s:sub(1, n)
+    end
+    return s
+end
+
+function P.Build(who, where, body, cap)
+    local head = P.FWD .. P.Clean(who, 32) .. (where ~= "" and (" · " .. P.Clean(where, 32)) or "")
+    body = tostring(body or "")
+    local room = cap - #head - 1
+    if #body > room then
+        body = body:sub(1, math.max(room - 3, 0))
+        while #body > 0 and not utf8.len(body) do body = body:sub(1, -2) end
+        body = body .. "…"
+        if select(2, body:gsub("```", "")) % 2 == 1 then body = body .. "\n```" end
+    end
+    return head .. "\n" .. body
+end
+
+function P.Author(msg)
+    return tostring((msg.display ~= nil and msg.display ~= "") and msg.display or msg.name or "?")
+end
+
+-- polls, config cards and join cards are special messages, they can't be forwarded
+function P.Can(msg)
+    if type(msg) ~= "table" or not msg.id or msg.cfg ~= nil then return false end
+    local t = tostring(msg.text or "")
+    if t:match("^%s*%[poll|") or t:match("^%s*%[join|") then return false end
+    return t ~= "" or type(msg.image) == "table"
+end
+
+function P.Label(t)
+    if t.kind == "dm" then return "@" .. t.name end
+    if t.kind == "grp" then return "«" .. t.name .. "»" end
+    return "#" .. t.name
+end
+
+-- ---------- everywhere a message can be forwarded to ----------
+function Chat:_FwdTargets()
+    local out, seen = {}, {}
+    local me = LocalPlayer.UserId
+    local function Add(t)
+        if t.room and not seen[t.room] then
+            seen[t.room] = true
+            out[#out + 1] = t
+        end
+    end
+    for _, ch in ipairs(self.Channels) do
+        if not ch.kind then
+            Add({ room = ch.room, kind = "pub", name = tostring(ch.name or "Global"), sub = "Channel" })
+        end
+    end
+    for _, ch in ipairs(self.Channels) do
+        if ch.kind == "dm" and ch.uid then
+            Add({ room = ch.room, kind = "dm", uid = tonumber(ch.uid), name = tostring(ch.name or ch.uid), sub = "Direct message" })
+        end
+    end
+    for _, ch in ipairs(self.Channels) do
+        if ch.kind == "grp" then
+            local ids = {}
+            for _, m in ipairs(ch.members or {}) do
+                local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+                if id and id ~= me then ids[#ids + 1] = id end
+            end
+            local n = #(ch.members or {})
+            Add({ room = ch.room, kind = "grp", name = tostring(ch.name or "Group"), ids = ids, ch = ch,
+                sub = "Group chat" .. (n > 0 and (" · " .. n .. " members") or "") })
+        end
+    end
+    -- friends you haven't opened a DM with yet
+    for _, u in ipairs((self.Friends and self.Friends.friends) or {}) do
+        local uid = tonumber(u.uid)
+        local room = uid and uid ~= me and self:DMRoom(uid)
+        if room then
+            Add({ room = room, kind = "dm", uid = uid, new = true, user = u,
+                name = tostring((u.display and u.display ~= "") and u.display or u.name or uid), sub = "Friend · @" .. tostring(u.name or uid) })
+        end
+    end
+    return out
+end
+
+-- ---------- the picker ----------
+function Chat:ForwardMessage(msg)
+    if not P.Can(msg) then return end
+    if self.Blocked then
+        Lib:Notify({ Title = "Forward", Text = "You can't send messages right now.", Type = "warn" })
+        return
+    end
+    local src = { room = self.Room, ch = self.Channels[self.ChIndex], msg = msg }
+    local targets = self:_FwdTargets()
+    local me = LocalPlayer.UserId
+    local Z, W, HH = 98, 420, 560 -- below Lib:Prompt (100), so "someone else" can open on top
+    local sel, count, rows, groups = {}, 0, {}, {}
+    local sending = false
+
+    local dim = New("TextButton", { Name = "ForwardDim", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.45,
+        BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+    local card = Sink(New("Frame", { Name = "ForwardCard", Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 1, Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+    Corner(card, 10) Stroke(card)
+    local vp = Lib.Overlay.AbsoluteSize
+    New("UIScale", { Scale = (vp.X > 0 and vp.Y > 0) and math.min(1, vp.X / (W + 20), vp.Y / (HH + 20)) or 1, Parent = card })
+    local function Close() if dim.Parent then dim:Destroy() end end
+    dim.Activated:Connect(Close)
+
+    -- header
+    New("TextLabel", { Text = "Forward To", Font = Lib.FontBold, TextSize = 20, Size = UDim2.new(1, -70, 0, 26), Position = UDim2.fromOffset(20, 14),
+        TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+    New("TextLabel", { Text = "Select where you want to share this message.", TextSize = 12, Size = UDim2.new(1, -40, 0, 16), Position = UDim2.fromOffset(20, 42),
+        TextXAlignment = LEFT, ZIndex = Z + 2, Theme = { TextColor3 = "Dim" }, Parent = card })
+    local x = New("TextButton", { Text = "×", TextSize = 24, Size = UDim2.fromOffset(32, 32), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10),
+        ZIndex = Z + 2, Theme = { TextColor3 = "Dim" }, Parent = card })
+    x.Activated:Connect(Close)
+
+    -- search
+    local sf = New("Frame", { Size = UDim2.new(1, -40, 0, 36), Position = UDim2.fromOffset(20, 68), BackgroundTransparency = 0, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(sf, 8) Stroke(sf, "Accent", 1.5, 0.15)
+    Lib.Icon("search", 16, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), ZIndex = Z + 3, Parent = sf }, "?")
+    local sbox = New("TextBox", { Text = "", PlaceholderText = "Search", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 14, Size = UDim2.new(1, -44, 1, 0),
+        Position = UDim2.fromOffset(36, 0), TextXAlignment = LEFT, ZIndex = Z + 3, Parent = sf })
+
+    -- list
+    local list = New("ScrollingFrame", { Size = UDim2.new(1, -16, 0, HH - 116 - 132), Position = UDim2.fromOffset(8, 116), AutomaticCanvasSize = Y,
+        ScrollBarThickness = 3, ZIndex = Z + 2, Parent = card })
+    List(list, 2) Pad(list, 4, 0, 4, 0)
+    local empty = New("TextLabel", { Text = "No chats match your search.", TextSize = 12, Size = UDim2.new(1, 0, 0, 40), LayoutOrder = 99999, Visible = false,
+        ZIndex = Z + 3, Theme = { TextColor3 = "Dim" }, Parent = list })
+
+    -- footer: what you're forwarding, an optional message, Send
+    New("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, HH - 124), BackgroundTransparency = 0.5, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Stroke" }, Parent = card })
+    local pv = New("Frame", { Size = UDim2.new(1, -40, 0, 40), Position = UDim2.fromOffset(20, HH - 114), BackgroundTransparency = 1, ZIndex = Z + 2, Parent = card })
+    Corner(New("Frame", { Size = UDim2.new(0, 3, 1, 0), BackgroundTransparency = 0, ZIndex = Z + 3, Theme = { BackgroundColor3 = "Stroke" }, Parent = pv }), 2)
+    local who, _, rest = P.Parse(msg.text)
+    local snip = P.Clean(who and rest or msg.text, 160)
+    if type(msg.image) == "table" then snip = (snip ~= "" and (snip .. " ") or "") .. "[image]" end
+    New("TextLabel", { RichText = true, Text = "<b>" .. RichEsc(P.Clean(who or P.Author(msg), 32)) .. "</b>  " .. RichEsc(snip), TextSize = 12,
+        Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(12, 0), TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 3, Theme = { TextColor3 = "SubText" }, Parent = pv })
+
+    local inF = New("Frame", { Size = UDim2.new(1, -40 - 96, 0, 40), Position = UDim2.fromOffset(20, HH - 64), BackgroundTransparency = 0, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(inF, 8)
+    local cbox = New("TextBox", { Text = "", PlaceholderText = "Add an optional message...", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 13,
+        Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(10, 0), TextXAlignment = LEFT, ZIndex = Z + 3, Parent = inF })
+    local sendBtn = New("TextButton", { Text = "Send", Font = Lib.FontBold, TextSize = 14, Size = UDim2.fromOffset(84, 40), AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -20, 0, HH - 64), BackgroundTransparency = 0.6, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+    Corner(sendBtn, 8)
+
+    -- behaviour
+    local function Refresh()
+        sendBtn.Text = count > 0 and ("Send (" .. count .. ")") or "Send"
+        sendBtn.BackgroundTransparency = count > 0 and 0 or 0.6
+    end
+
+    local function SetSel(rec, on)
+        local room = rec.t.room
+        if on then
+            if sel[room] then return end
+            if count >= P.MAX then
+                Lib:Notify({ Title = "Forward", Text = "You can forward to up to " .. P.MAX .. " chats at once.", Type = "warn", Duration = 2.5 })
+                return
+            end
+            sel[room] = rec
+            count = count + 1
+        else
+            if not sel[room] then return end
+            sel[room] = nil
+            count = count - 1
+        end
+        rec.fill.Visible = on
+        rec.row.BackgroundTransparency = on and 0.7 or 1
+        Refresh()
+    end
+
+    local GROUPS = { pub = { 1, "CHANNELS" }, dm = { 2, "DIRECT MESSAGES" }, grp = { 3, "GROUP CHATS" }, friend = { 4, "FRIENDS" } }
+    local function Group(kind)
+        local g = groups[kind]
+        if g then return g end
+        local def = GROUPS[kind]
+        g = { order = def[1] * 10000, n = 0, rows = {} }
+        g.head = New("TextLabel", { Text = def[2], Font = Lib.FontBold, TextSize = 10, Size = UDim2.new(1, 0, 0, 24), LayoutOrder = g.order,
+            TextXAlignment = LEFT, ZIndex = Z + 3, Theme = { TextColor3 = "Dim" }, Parent = list })
+        Pad(g.head, 8, 8, 0, 0)
+        groups[kind] = g
+        return g
+    end
+
+    local function BaseRow(order, name, sub)
+        local row = New("TextButton", { Name = "Row", Text = "", Size = UDim2.new(1, 0, 0, 50), LayoutOrder = order, BackgroundTransparency = 1, ZIndex = Z + 3,
+            Theme = { BackgroundColor3 = "FieldHover" }, Parent = list })
+        Corner(row, 8)
+        local av = New("Frame", { Size = UDim2.fromOffset(36, 36), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), BackgroundTransparency = 0,
+            ZIndex = Z + 4, Theme = { BackgroundColor3 = "Field" }, Parent = row })
+        Corner(av, 18)
+        New("TextLabel", { Text = name, Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -110, 0, 18), Position = UDim2.fromOffset(56, sub and 8 or 16),
+            TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 4, Parent = row })
+        if sub then
+            New("TextLabel", { Text = sub, TextSize = 11, Size = UDim2.new(1, -110, 0, 14), Position = UDim2.fromOffset(56, 27), TextXAlignment = LEFT,
+                TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 4, Theme = { TextColor3 = "Dim" }, Parent = row })
+        end
+        return row, av
+    end
+
+    local function AddRow(t)
+        local g = Group((t.kind == "dm" and t.new) and "friend" or t.kind)
+        g.n = g.n + 1
+        local row, av = BaseRow(g.order + g.n, t.name, t.sub)
+        if t.kind == "dm" then
+            local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Parent = av })
+            Corner(img, 18)
+            GetAvatar(t.uid, function(u) if img.Parent then img.Image = u end end)
+        elseif t.kind == "grp" then
+            local glyph = New("TextLabel", { Text = "«", Font = Lib.FontBold, TextSize = 18, Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Parent = av })
+            pcall(function()
+                local entry = Lib:LoadGroupIcons()[tostring(t.ch.gid)]
+                if entry then
+                    local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Parent = av })
+                    Corner(img, 18)
+                    self:_IconAsset(entry, t.room, function(asset) if img.Parent then img.Image = asset glyph.Text = "" end end)
+                elseif #t.ids > 0 then
+                    av.BackgroundTransparency = 1
+                    glyph.Text = ""
+                    self:_Collage(av, t.ids, 36, Z + 5)
+                end
+            end)
+        else
+            New("TextLabel", { Text = "#", Font = Lib.FontBold, TextSize = 20, Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Theme = { TextColor3 = "SubText" }, Parent = av })
+        end
+        local box = New("Frame", { Size = UDim2.fromOffset(22, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), BackgroundTransparency = 0,
+            ZIndex = Z + 4, Theme = { BackgroundColor3 = "Field" }, Parent = row })
+        Corner(box, 5) Stroke(box, "Stroke", 1.5, 0.1)
+        local fill = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0, Visible = false, ZIndex = Z + 5, Theme = { BackgroundColor3 = "Accent" }, Parent = box })
+        Corner(fill, 5)
+        Lib.Icon("check", 14, "OnAccent", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 6, Parent = fill }, "✓")
+        local rec = { row = row, t = t, fill = fill, hay = (t.name .. " " .. t.sub):lower() }
+        rows[#rows + 1] = rec
+        g.rows[#g.rows + 1] = rec
+        row.MouseEnter:Connect(function() if not sel[t.room] then Tween(row, { BackgroundTransparency = 0.55 }, 0.06) end end)
+        row.MouseLeave:Connect(function() if not sel[t.room] then Tween(row, { BackgroundTransparency = 1 }, 0.08) end end)
+        row.Activated:Connect(function() SetSel(rec, not sel[t.room]) end)
+        return rec
+    end
+
+    local other = BaseRow(90000, "Message someone else...", nil)
+    do
+        local av = other:FindFirstChildWhichIsA("Frame")
+        if av then New("TextLabel", { Text = "+", Font = Lib.FontBold, TextSize = 22, Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Theme = { TextColor3 = "SubText" }, Parent = av }) end
+    end
+
+    local function Filter()
+        local q = Trim(sbox.Text):lower()
+        local shown = 0
+        for _, g in pairs(groups) do
+            local any = false
+            for _, r in ipairs(g.rows) do
+                local show = q == "" or r.hay:find(q, 1, true) ~= nil
+                r.row.Visible = show
+                if show then any = true shown = shown + 1 end
+            end
+            g.head.Visible = any
+        end
+        other.Visible = q == ""
+        empty.Visible = q ~= "" and shown == 0
+    end
+    sbox:GetPropertyChangedSignal("Text"):Connect(Filter)
+
+    other.Activated:Connect(function()
+        Lib:Prompt({ Title = "Forward to someone", Text = "Roblox username or user ID. They don't have to be online.", Placeholder = "@username", Confirm = "Add" }, function(text)
+            if not dim.Parent then return end
+            self:ResolveUser(text, function(u)
+                if not dim.Parent then return end
+                if not u then Lib:Notify({ Title = "Forward", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+                if tonumber(u.uid) == me then Lib:Notify({ Title = "Forward", Text = "That's you.", Type = "warn" }) return end
+                local room = self:DMRoom(u.uid)
+                local have
+                for _, r in ipairs(rows) do if r.t.room == room then have = r break end end
+                if not have then
+                    have = AddRow({ room = room, kind = "dm", uid = tonumber(u.uid), user = u, new = self:_RoomIndex(room) == nil,
+                        name = tostring((u.display and u.display ~= "") and u.display or u.name), sub = "@" .. tostring(u.name) })
+                end
+                if sbox.Text ~= "" then sbox.Text = "" end
+                Filter()
+                SetSel(have, true)
+            end)
+        end)
+    end)
+
+    local function DoSend()
+        if sending or count == 0 then return end
+        sending = true
+        local chosen = {}
+        for _, r in ipairs(rows) do if sel[r.t.room] then chosen[#chosen + 1] = r.t end end
+        local comment = Trim(cbox.Text)
+        Close()
+        self:_ForwardRun(src, chosen, comment)
+    end
+    sendBtn.Activated:Connect(DoSend)
+    cbox.FocusLost:Connect(function(enter) if enter then DoSend() end end)
+
+    for _, t in ipairs(targets) do AddRow(t) end
+    Refresh()
+    Filter()
+    if not Lib.Touch then task.defer(function() if sbox.Parent then sbox:CaptureFocus() end end) end
+end
+
+-- ---------- sending ----------
+function P.SendTo(self, t, text, data, comment)
+    local room = t.room
+    if t.new and not self:_RoomIndex(room) then
+        self:AddDM(t.uid, t.user and t.user.name or t.name, t.name)
+        local q = { after = -1, peer = t.uid }
+        if t.user and t.user.name then q.peer_name = tostring(t.user.name) end
+        if t.name and t.name ~= "" then q.peer_display = tostring(t.name) end
+        self:_Do("/poll", q, nil, nil, room)
+    end
+    local imageId
+    if data then
+        local d = Decode(self:_Do("/upload", nil, "POST", HttpService:JSONEncode({ data = data }), room))
+        if not (d and d.ok and d.id) then return false, (d and d.error) or "Upload failed." end
+        imageId = d.id
+    end
+    local r = Decode(self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = text, image = imageId }), room))
+    if not (r and r.ok) then return false, (r and r.error) or "Couldn't send." end
+    if comment ~= "" then
+        task.wait(0.85) -- the relay rejects two messages from you in the same chat less than ~0.7 s apart
+        self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = comment }), room)
+    end
+    return true
+end
+
+function Chat:_ForwardRun(src, chosen, comment)
+    local msg = src.msg
+    local who, where, body = P.Parse(msg.text)
+    if not who then
+        -- the source channel is only named for public channels, never for DMs or group chats
+        who = P.Author(msg)
+        where = (src.ch and not src.ch.kind) and ("#" .. tostring(src.ch.name or "")) or ""
+        body = tostring(msg.text or "")
+    end
+    local cap = math.max(tonumber(self.Config.MaxLength) or 200, 200)
+    local text = P.Build(who, where, body, cap)
+    comment = comment:sub(1, cap)
+    local img = type(msg.image) == "table" and msg.image or nil
+    Lib:Notify({ Title = "Forward", Text = "Forwarding to " .. #chosen .. (#chosen == 1 and " chat..." or " chats..."), Type = "info", Duration = 2 })
+    task.spawn(function()
+        local data
+        if img then
+            local d = Decode(self:_Do("/img", { id = img.id }, nil, nil, src.room))
+            data = d and d.ok and d.data or nil
+            if not data then
+                Lib:Notify({ Title = "Forward", Text = (d and d.error) or "Couldn't read that image. It may have expired.", Type = "error" })
+                return
+            end
+        end
+        local good, bad, firstErr = {}, {}, nil
+        for i, t in ipairs(chosen) do
+            local ok, err = P.SendTo(self, t, text, data, comment)
+            if ok then
+                good[#good + 1] = P.Label(t)
+                if t.room == self.Room then
+                    self.Stick = true
+                    self:_PollOnce()
+                end
+            else
+                bad[#bad + 1] = P.Label(t)
+                firstErr = firstErr or err
+            end
+            if i < #chosen then task.wait(0.8) end
+        end
+        self.LastSend = os.clock()
+        if #good > 0 then
+            Lib:Notify({ Title = "Forwarded", Text = "Sent to " .. table.concat(good, ", ") .. ".", Type = "success", Duration = 3 })
+        end
+        if #bad > 0 then
+            Lib:Notify({ Title = "Forward", Text = "Couldn't send to " .. table.concat(bad, ", ") .. ": " .. tostring(firstErr), Type = "error", Duration = 5 })
+        end
+    end)
+end
+
+-- ---------- "↪ Forwarded from ..." label above the forwarded text ----------
+P.Rich = Chat._Rich
+function Chat:_Rich(text, meta)
+    local who, where, rest = P.Parse(text)
+    if not who then return P.Rich(self, text, meta) end
+    local head = "<font color='#" .. Hex("Dim") .. "' size='11'><i>↪ Forwarded from <b>" .. RichEsc(who) .. "</b>"
+        .. (where ~= "" and (" · " .. RichEsc(where)) or "") .. "</i></font>"
+    if rest == "" then return head end
+    return head .. "\n" .. P.Rich(self, rest, meta)
+end
+
+-- ---------- menu: Forward (under Reply); forwarded messages can't be edited and copy/reply use the original text ----------
+P.MenuItems = Chat._MenuItems
+function Chat:_MenuItems(msg)
+    local groups = P.MenuItems(self, msg)
+    if type(groups) ~= "table" or type(msg) ~= "table" then return groups end
+    if P.Can(msg) and type(groups[1]) == "table" then
+        local pos = #groups[1] + 1
+        for i, it in ipairs(groups[1]) do
+            if it.Text == "Reply" then pos = i + 1 break end
+        end
+        table.insert(groups[1], pos, { Text = "Forward", Icon = "forward", Cb = function() self:ForwardMessage(msg) end })
+    end
+    local who, _, rest = P.Parse(msg.text)
+    if who then
+        for _, g in ipairs(groups) do
+            for i = #g, 1, -1 do
+                local it = g[i]
+                if it.Text == "Edit Message" or (it.Text == "Copy Text" and rest == "") then
+                    table.remove(g, i)
+                elseif it.Text == "Copy Text" then
+                    it.Cb = function() if type(setclipboard) == "function" then setclipboard(rest) end end
+                elseif it.Text == "Reply" then
+                    it.Cb = function()
+                        self:SetReply({ id = msg.id, name = P.Author(msg), text = P.Clean(rest ~= "" and rest or ("Forwarded from " .. who), 70) })
+                    end
+                end
+            end
+        end
+    end
+    return groups
+end
+
+end
+-- ===================== end patch 6.0 =====================
+
 
 return Lib
