@@ -16730,5 +16730,667 @@ end)
 end
 -- ===================== end patch 6.2 =====================
 
+-- ===================== Aether patch 6.3: user settings, profile art =====================
+do
+local P = {}
+Lib.Version = "6.3.0"
+
+-- ==================== 1) saved profile art ====================
+Lib.Art = {}
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/profileart.json" end
+    local function Clean(e)
+        if type(e) ~= "table" then return nil end
+        if type(e.asset) == "string" and e.asset:find("^rbxassetid://%d+$") then return { asset = e.asset } end
+        if e.id ~= nil and #tostring(e.id) < 80 then
+            return { id = tostring(e.id), mime = type(e.mime) == "string" and e.mime or "image/png" }
+        end
+        return nil
+    end
+    function Lib:LoadArt()
+        if loaded then return self.Art end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                self.Art.pfp = Clean(d.pfp)
+                self.Art.banner = Clean(d.banner)
+            end)
+        end
+        return self.Art
+    end
+    function Lib:SaveArt()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.6, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                writefile(Path(), HttpService:JSONEncode({ pfp = Lib.Art.pfp, banner = Lib.Art.banner }))
+            end)
+        end)
+    end
+end
+
+function Lib:SetArt(kind, entry)
+    local a = self:LoadArt()
+    a[kind] = entry
+    self:SaveArt()
+    local c = self.ChatObj
+    if not c then return end
+    pcall(function() c:_UpdateUserPanel() end)
+    -- best effort: tell the relay (older relays just ignore this)
+    task.spawn(function()
+        pcall(function()
+            local body = { kind = kind, clear = true }
+            if entry and entry.id then body = { kind = kind, image = entry.id }
+            elseif entry and entry.asset then body = { kind = kind, asset = entry.asset } end
+            c:_Do("/profile/art", nil, "POST", HttpService:JSONEncode(body))
+        end)
+    end)
+end
+
+-- resolves { asset = ... } or { id = ... } to something an ImageLabel can show
+function Chat:_ArtImage(entry, cb)
+    if not entry then return end
+    if entry.asset then cb(entry.asset) return end
+    self:_IconAsset(entry, self.Room, cb)
+end
+
+-- ==================== 2) picking art (image search / asset id / reset) ====================
+function Chat:ChooseArt(kind, anchor, after)
+    local label = kind == "pfp" and "profile picture" or "banner"
+    local items = {
+        { Text = "Search images...", Callback = function()
+            self._artPick = { kind = kind, after = after, shown = false }
+            Lib:Notify({ Title = "Profile", Text = "Search for a picture, then tap it to use it as your " .. label .. ".", Type = "info", Duration = 4 })
+            self:PickSearch()
+        end },
+        { Text = "Use an asset id...", Callback = function()
+            Lib:Prompt({ Title = "Asset id", Text = "Paste an Image asset id (a number or rbxassetid://...).", Placeholder = "123456789", Confirm = "Use" }, function(t)
+                t = Trim(t)
+                local n = t:match("^(%d+)$") or t:match("rbxassetid://(%d+)") or t:match("[?&]id=(%d+)")
+                if not n then Lib:Notify({ Title = "Profile", Text = "That doesn't look like an asset id.", Type = "error" }) return end
+                Lib:SetArt(kind, { asset = "rbxassetid://" .. n })
+                if after then Safe(after) end
+            end)
+        end },
+    }
+    if Lib:LoadArt()[kind] then
+        table.insert(items, { Text = "Reset to default", Danger = true, Callback = function()
+            Lib:SetArt(kind, nil)
+            if after then Safe(after) end
+        end })
+    end
+    self:Menu(items, anchor)
+end
+
+P.PickSearch = Chat.PickSearch
+function Chat:PickSearch()
+    local pk = self._artPick
+    if pk and pk.started then self._artPick = nil end -- a stale pick from a cancelled search
+    if self._artPick then self._artPick.started = true end
+    return P.PickSearch(self)
+end
+
+P.ShowResults = Chat.ShowResults
+function Chat:ShowResults(q)
+    local pk = self._artPick
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowResults(self, q)
+    if not pk then return end
+    pk.shown = true
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do
+        if not before[c] and c:IsA("TextButton") then
+            c.Destroying:Connect(function()
+                task.delay(0.5, function() if self._artPick == pk then self._artPick = nil end end)
+            end)
+        end
+    end
+end
+
+P.SendImage = Chat.SendImage
+function Chat:SendImage(payload)
+    local pk = self._artPick
+    if pk then
+        self._artPick = nil
+        if pk.shown then
+            self:_SetArt(pk, payload)
+            return
+        end
+    end
+    return P.SendImage(self, payload)
+end
+
+function Chat:_SetArt(pk, payload)
+    Lib:Notify({ Title = "Profile", Text = "Uploading...", Type = "info", Duration = 2 })
+    task.spawn(function()
+        local d = Decode(self:_Do("/upload", nil, "POST", HttpService:JSONEncode(payload)))
+        if not (d and d.ok and d.id ~= nil) then
+            Lib:Notify({ Title = "Profile", Text = (d and d.error) or "Upload failed.", Type = "error" })
+            return
+        end
+        Lib:SetArt(pk.kind, { id = tostring(d.id), mime = type(d.mime) == "string" and d.mime or "image/png" })
+        Lib:Notify({ Title = "Profile", Text = (pk.kind == "pfp" and "Profile picture" or "Banner") .. " updated.", Type = "success", Duration = 3 })
+        if pk.after then Safe(pk.after) end
+    end)
+end
+
+-- ==================== 3) sidebar user panel shows your picture ====================
+P.UpdateUserPanel = Chat._UpdateUserPanel
+function Chat:_UpdateUserPanel()
+    P.UpdateUserPanel(self)
+    pcall(function()
+        local u = self._up
+        if not (u and u.name.Parent) then return end
+        local av = u.name.Parent:FindFirstChildWhichIsA("ImageLabel")
+        if not av then return end
+        local e = Lib:LoadArt().pfp
+        local key = e and (e.asset or e.id) or "default"
+        if u.artKey == key then return end
+        u.artKey = key
+        av.ScaleType = Enum.ScaleType.Crop
+        if e then
+            self:_ArtImage(e, function(a) if av.Parent and u.artKey == key then av.Image = a end end)
+        else
+            GetAvatar(LocalPlayer.UserId, function(url) if av.Parent and u.artKey == key then av.Image = url end end)
+        end
+    end)
+end
+
+-- ==================== 4) profile card: headshot fix, custom art, Edit Profile ====================
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    local ok, err = pcall(function()
+        local uid = tonumber(u.uid)
+        if not uid then return end
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c:IsA("TextButton") then dim = c end
+        end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        if not card then return end
+        local head, holder
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("Frame") then
+                if c.Name == "Banner" then holder = c elseif c.LayoutOrder == 1 then head = c end
+            end
+        end
+        local pic = head and head:FindFirstChildWhichIsA("ImageLabel")
+        if not pic then return end
+        local fill = holder and holder:FindFirstChildWhichIsA("Frame")
+        local mine = uid == LocalPlayer.UserId
+
+        -- the avatar: a cropped headshot (the old bust thumbnail looked cut off in the circle)
+        pic.ScaleType = Enum.ScaleType.Crop
+        pic.BackgroundTransparency = 0
+        local want
+        pic:GetPropertyChangedSignal("Image"):Connect(function()
+            if want and pic.Image ~= want then pic.Image = want end
+        end)
+        local function Pfp(e)
+            if e then self:_ArtImage(e, function(a) want = a pic.Image = a end)
+            else GetAvatar(uid, function(a) want = a pic.Image = a end, "HeadShot", "Size150x150") end
+        end
+        local banner
+        local function Banner(e)
+            if not (e and fill and fill.Parent) then return end
+            fill.ClipsDescendants = true
+            if not banner then
+                banner = New("ImageLabel", { Size = UDim2.new(1, 0, 1, 14), ScaleType = Enum.ScaleType.Crop, ZIndex = 103, Parent = fill })
+                Corner(banner, 8)
+            end
+            self:_ArtImage(e, function(a) if banner and banner.Parent then banner.Image = a end end)
+        end
+
+        local art = mine and Lib:LoadArt() or {}
+        Pfp(art.pfp)
+        Banner(art.banner)
+
+        if mine then
+            local rows = {}
+            for _, c in ipairs(card:GetChildren()) do if c:IsA("GuiObject") and c.LayoutOrder > 0 then rows[#rows + 1] = c end end
+            table.sort(rows, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+            local last = rows[#rows]
+            local b = New("TextButton", { Text = "Edit Profile", TextSize = 12, Size = UDim2.new(1, 0, 0, H(28)), LayoutOrder = last and last.LayoutOrder or 99,
+                BackgroundTransparency = 0, ZIndex = 103, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+            Corner(b, 5)
+            if last then last.LayoutOrder = last.LayoutOrder + 1 end
+            b.Activated:Connect(function()
+                if dim.Parent then dim:Destroy() end
+                self:OpenSettings("profiles")
+            end)
+        else
+            -- other people: only if the relay hands out their art
+            task.spawn(function()
+                local d = Decode(self:_Do("/profile", { target = uid }))
+                local us = d and d.ok and d.user
+                if not (us and dim.Parent) then return end
+                local function E(v)
+                    if type(v) == "table" and v.id ~= nil then return { id = tostring(v.id), mime = type(v.mime) == "string" and v.mime or "image/png" } end
+                    if type(v) == "string" and v ~= "" and #v < 80 then return { id = v, mime = "image/png" } end
+                end
+                local p, bn = E(us.pfp), E(us.banner)
+                if p then Pfp(p) end
+                if bn then Banner(bn) end
+            end)
+        end
+
+        -- "Member since" showed "-" for people in your server
+        local plr = Players:GetPlayerByUserId(uid)
+        if plr then
+            for _, d in ipairs(card:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Text == "Member since" then
+                    for _, v in ipairs(d.Parent:GetChildren()) do
+                        if v:IsA("TextLabel") and v ~= d and v.Text == "-" then
+                            v.Text = os.date("%Y-%m-%d", os.time() - plr.AccountAge * 86400)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] profile art: " .. tostring(err)) end
+end
+
+-- ==================== 5) the User Settings screen ====================
+function Chat:_ProfilePreview(parent, order)
+    local art = Lib:LoadArt()
+    local card = New("Frame", { Name = "Preview", Size = UDim2.new(1, 0, 0, 150), LayoutOrder = order, BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Card" }, Parent = parent })
+    Corner(card, 10) Stroke(card, "Stroke", 1, 0.4)
+    local ban = New("Frame", { Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 84), BackgroundColor3 = Lib.Theme.Accent:Lerp(Color3.new(0, 0, 0), 0.3), Parent = card })
+    Corner(ban, 8)
+    if art.banner then
+        local bi = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, Parent = ban })
+        Corner(bi, 8)
+        self:_ArtImage(art.banner, function(a) if bi.Parent then bi.Image = a end end)
+    end
+    local av = New("ImageLabel", { Size = UDim2.fromOffset(76, 76), Position = UDim2.fromOffset(24, 62), BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop,
+        ZIndex = 3, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(av, 38) Stroke(av, "Card", 5, 0)
+    if art.pfp then self:_ArtImage(art.pfp, function(a) if av.Parent then av.Image = a end end)
+    else GetAvatar(LocalPlayer.UserId, function(a) if av.Parent then av.Image = a end end, "HeadShot", "Size150x150") end
+    local nm = Lib:LoadChatName()
+    if nm == "" then nm = LocalPlayer.DisplayName end
+    New("TextLabel", { Text = nm, Font = Lib.FontBold, TextSize = 18, Size = UDim2.new(1, -130, 0, 22), Position = UDim2.fromOffset(112, 98), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+    New("TextLabel", { Text = "@" .. LocalPlayer.Name, TextSize = 12, Size = UDim2.new(1, -130, 0, 16), Position = UDim2.fromOffset(112, 121), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = card })
+    return card
+end
+
+function Chat:OpenSettings(page)
+    if self._set and self._set.Parent then self._set:Destroy() end
+    local chat = self
+    -- lives in Lib.Gui at a very high ZIndex: above the window and above fullscreen chat, below menus / dialogs
+    local root = Sink(New("Frame", { Name = "UserSettings", Size = UDim2.fromScale(1, 1), ZIndex = 500, Theme = { BackgroundColor3 = "Bg" }, Parent = Lib.Gui }))
+    self._set = root
+    local esc
+    local function Close()
+        if esc then esc:Disconnect() esc = nil end
+        if root.Parent then root:Destroy() end
+    end
+    esc = UIS.InputBegan:Connect(function(i)
+        if i.KeyCode == Enum.KeyCode.Escape and not UIS:GetFocusedTextBox() then Close() end
+    end)
+    root.Destroying:Connect(function() if esc then esc:Disconnect() esc = nil end end)
+
+    local vpx = Lib.Gui.AbsoluteSize.X
+    local SW = vpx < 700 and 190 or 250
+    local titles = { account = "My Account", profiles = "Profiles", notifs = "Notifications", appearance = "Appearance", privacy = "Privacy & Blocking" }
+    local navDef = {
+        { "account", "user", "My Account" }, { "profiles", "image", "Profiles" }, { "notifs", "bell", "Notifications" },
+        { "appearance", "palette", "Appearance" }, { "privacy", "shield", "Privacy & Blocking" },
+    }
+    local cur, Show = nil, nil
+
+    -- ---- sidebar ----
+    local side = New("Frame", { Size = UDim2.new(0, SW, 1, 0), Theme = { BackgroundColor3 = "Surface" }, Parent = root })
+    local sl = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, -64), AutomaticCanvasSize = Y, ScrollBarThickness = 0, Parent = side })
+    List(sl, 2) Pad(sl, 12, 16, 12, 8)
+
+    local headB = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, 54), LayoutOrder = 1, BackgroundTransparency = 1, Parent = sl })
+    local hav = New("ImageLabel", { Size = UDim2.fromOffset(40, 40), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0), BackgroundTransparency = 0,
+        ScaleType = Enum.ScaleType.Crop, Theme = { BackgroundColor3 = "Field" }, Parent = headB })
+    Corner(hav, 20)
+    local art0 = Lib:LoadArt()
+    if art0.pfp then self:_ArtImage(art0.pfp, function(a) if hav.Parent then hav.Image = a end end)
+    else GetAvatar(LocalPlayer.UserId, function(a) if hav.Parent then hav.Image = a end end, "HeadShot", "Size150x150") end
+    local hn = Lib:LoadChatName()
+    if hn == "" then hn = LocalPlayer.DisplayName end
+    New("TextLabel", { Text = hn, Font = Lib.FontBold, TextSize = 14, Size = UDim2.new(1, -56, 0, 18), Position = UDim2.fromOffset(54, 8), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = headB })
+    local ep = New("Frame", { Size = UDim2.new(1, -56, 0, 14), Position = UDim2.fromOffset(54, 28), BackgroundTransparency = 1, Parent = headB })
+    Lib.Icon("pencil", 11, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Parent = ep }, "e")
+    New("TextLabel", { Text = "Edit Profiles", TextSize = 11, Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(14, 0), TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = ep })
+    headB.Activated:Connect(function() Show("profiles") end)
+
+    New("TextLabel", { Text = "User Settings", Font = Lib.FontBold, TextSize = 11, Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 2, TextXAlignment = LEFT,
+        Theme = { TextColor3 = "Dim" }, Parent = sl })
+
+    local navB = {}
+    for i, def in ipairs(navDef) do
+        local b = New("TextButton", { Text = "", Size = UDim2.new(1, 0, 0, 36), LayoutOrder = 2 + i, BackgroundTransparency = 1, Theme = { BackgroundColor3 = "FieldHover" }, Parent = sl })
+        Corner(b, 6)
+        local ico = Lib.Icon(def[2], 16, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Parent = b })
+        local lbl = New("TextLabel", { Text = def[3], TextSize = 14, Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(36, 0), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "SubText" }, Parent = b })
+        navB[def[1]] = { b = b, lbl = lbl, ico = ico }
+        b.MouseEnter:Connect(function() if cur ~= def[1] then Tween(b, { BackgroundTransparency = 0.6 }, 0.06) end end)
+        b.MouseLeave:Connect(function() if cur ~= def[1] then Tween(b, { BackgroundTransparency = 1 }, 0.08) end end)
+        b.Activated:Connect(function() Show(def[1]) end)
+    end
+    local function StyleNav()
+        for k, n in pairs(navB) do
+            local on = k == cur
+            n.b.BackgroundTransparency = on and 0.35 or 1
+            n.lbl.TextColor3 = on and Lib.Theme.Text or Lib.Theme.SubText
+            Tint(n.ico, on and Lib.Theme.Text or Lib.Theme.SubText, 0.05)
+        end
+    end
+
+    local foot = New("Frame", { Size = UDim2.new(1, -24, 0, 52), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -8), BackgroundTransparency = 1, Parent = side })
+    List(foot, 6, Enum.FillDirection.Vertical, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Bottom)
+    local function FootBtn(text, order, fn)
+        local b = New("TextButton", { Text = text, TextSize = 12, Size = UDim2.new(1, 0, 0, 24), LayoutOrder = order, BackgroundTransparency = 0,
+            Theme = { BackgroundColor3 = "Field", TextColor3 = "SubText" }, Parent = foot })
+        Corner(b, 5)
+        b.Activated:Connect(fn)
+    end
+    FootBtn("Hub menu", 1, function()
+        Close()
+        if chat.Full then chat:SetFullscreen(false) end
+        Lib:SetVisible(true)
+        local w = Lib.MainWindow
+        if w and w.Minimized then w:SetMinimized(false) end
+    end)
+    FootBtn("Close  (Esc)", 2, Close)
+
+    -- ---- content ----
+    local main = New("Frame", { Size = UDim2.new(1, -SW, 1, 0), Position = UDim2.fromOffset(SW, 0), BackgroundTransparency = 1, Parent = root })
+    local titleL = New("TextLabel", { Text = "", Font = Lib.FontBold, TextSize = 16, Size = UDim2.new(1, -80, 0, 52), Position = UDim2.fromOffset(24, 0), TextXAlignment = LEFT, Parent = main })
+    local x = IconButton(main, "x", "×", 32, "Close (Esc)", "Bad")
+    x.Button.AnchorPoint, x.Button.Position = Vector2.new(1, 0.5), UDim2.new(1, -16, 0, 26)
+    x.Button.Activated:Connect(Close)
+    New("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, 52), BackgroundTransparency = 0.5, Theme = { BackgroundColor3 = "Stroke" }, Parent = main })
+    local scroll = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, -53), Position = UDim2.fromOffset(0, 53), AutomaticCanvasSize = Y, ScrollBarThickness = 3, Parent = main })
+    Pad(scroll, 24, 24, 24, 48)
+    local stack = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0), BackgroundTransparency = 1, Parent = scroll })
+    List(stack, 12)
+    New("UISizeConstraint", { MaxSize = Vector2.new(680, 1e6), Parent = stack })
+
+    -- ---- builders ----
+    local order = 0
+    local function O() order = order + 1 return order end
+    local function Heading(t)
+        New("TextLabel", { Text = t, Font = Lib.FontBold, TextSize = 22, Size = UDim2.new(1, 0, 0, 30), TextXAlignment = LEFT, LayoutOrder = O(), Parent = stack })
+    end
+    local function Note(t)
+        local l = New("TextLabel", { Text = t, TextSize = 12, Size = UDim2.new(1, 0, 0, 16), TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top,
+            LayoutOrder = O(), Theme = { TextColor3 = "Dim" }, Parent = stack })
+        Wrap(l, nil, nil, 16)
+    end
+    local function Card()
+        local c = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, LayoutOrder = O(), Theme = { BackgroundColor3 = "Card" }, Parent = stack })
+        Corner(c, 8) Stroke(c, "Stroke", 1, 0.4) Pad(c, 16, 2, 16, 2) List(c, 0)
+        return c
+    end
+    local function Right(parent)
+        local f = New("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(0, 32), AutomaticSize = X, BackgroundTransparency = 1, Parent = parent })
+        List(f, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+        return f
+    end
+    local function Line(card, label, desc, build)
+        local r = New("Frame", { Size = UDim2.new(1, 0, 0, desc and 56 or 46), BackgroundTransparency = 1, LayoutOrder = O(), Parent = card })
+        New("TextLabel", { Text = label, TextSize = 14, Size = UDim2.new(1, -210, 0, 18), Position = UDim2.fromOffset(0, desc and 10 or 14), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+        if desc then
+            New("TextLabel", { Text = desc, TextSize = 11, Size = UDim2.new(1, -210, 0, 14), Position = UDim2.fromOffset(0, 30), TextXAlignment = LEFT,
+                TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = r })
+        end
+        New("Frame", { Size = UDim2.new(1, 0, 0, 1), AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), BackgroundTransparency = 0.6,
+            Theme = { BackgroundColor3 = "Stroke" }, Parent = r })
+        build(Right(r))
+    end
+    local function Btn(parent, text, fn, o)
+        o = o or {}
+        local b = New("TextButton", { Text = text, TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), BackgroundTransparency = 0,
+            Theme = { BackgroundColor3 = o.primary and "Accent" or "FieldHover", TextColor3 = o.primary and "OnAccent" or (o.danger and "Bad" or "Text") }, Parent = parent })
+        Corner(b, 5) Pad(b, 12, 0, 12, 0)
+        b.Activated:Connect(function() fn(b) end)
+        return b
+    end
+    local function Val(parent, text)
+        New("TextLabel", { Text = tostring(text), TextSize = 13, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), Theme = { TextColor3 = "SubText" }, Parent = parent })
+    end
+    local function Toggle(parent, get, set)
+        local on = get() and true or false
+        local b = New("TextButton", { Text = "", Size = UDim2.fromOffset(42, 24), BackgroundTransparency = 0, BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Stroke, Parent = parent })
+        Corner(b, 12)
+        local k = New("Frame", { Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, on and 21 or 3, 0.5, 0), BackgroundColor3 = WHITE, Parent = b })
+        Corner(k, 9)
+        b.Activated:Connect(function()
+            on = not on
+            Tween(b, { BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Stroke }, 0.12)
+            Tween(k, { Position = UDim2.new(0, on and 21 or 3, 0.5, 0) }, 0.14)
+            set(on)
+        end)
+    end
+    local function Seg(parent, values, getv, setv)
+        local f = New("Frame", { Size = UDim2.fromOffset(#values * 86, 28), BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field" }, Parent = parent })
+        Corner(f, 6)
+        local btns = {}
+        local function Paint()
+            for v, b in pairs(btns) do
+                local on = v == getv()
+                b.BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Field
+                b.TextColor3 = on and Lib.KnobOn() or Lib.Theme.SubText
+            end
+        end
+        for i, v in ipairs(values) do
+            local b = New("TextButton", { Text = v, TextSize = 12, Size = UDim2.new(1 / #values, -4, 1, -4), Position = UDim2.new((i - 1) / #values, 2, 0, 2), BackgroundTransparency = 0, Parent = f })
+            Corner(b, 5)
+            btns[v] = b
+            b.Activated:Connect(function() setv(v) Paint() end)
+        end
+        Paint()
+    end
+    local function Sync(idx, v) local t = Lib.Toggles[idx] if t then t:SetValue(v, true) end end
+
+    local pages = {}
+
+    pages.account = function()
+        Heading("My Account")
+        chat:_ProfilePreview(stack, O())
+        local c = Card()
+        local nm = Lib:LoadChatName()
+        Line(c, "Chat display name", nm ~= "" and nm or LocalPlayer.DisplayName, function(R)
+            Btn(R, "Edit", function()
+                Lib:Prompt({ Title = "Chat display name", Text = "Shown on your chat messages. Leave empty to use your Roblox display name.", Default = nm,
+                    Placeholder = LocalPlayer.DisplayName, Confirm = "Save" }, function(t)
+                    Lib:SetChatName(t)
+                    pcall(function() local o = Lib.Options.__ChatName if o then o:SetValue(t, true) end end)
+                    task.delay(1.2, function() if root.Parent and cur == "account" then Show("account") end end)
+                end)
+            end)
+        end)
+        local bio = Lib:LoadBio()
+        Line(c, "Bio", bio ~= "" and bio or "No bio yet", function(R)
+            Btn(R, "Edit", function()
+                Lib:Prompt({ Title = "Bio", Text = "Shown on your profile card (up to 120 characters).", Default = bio, Placeholder = "About me", Confirm = "Save" }, function(t)
+                    Lib:SetBio(t)
+                    pcall(function() local o = Lib.Options.__ChatBio if o then o:SetValue(t, true) end end)
+                    if root.Parent and cur == "account" then Show("account") end
+                end)
+            end)
+        end)
+        Line(c, "Username", nil, function(R) Val(R, "@" .. LocalPlayer.Name) end)
+        Line(c, "User ID", nil, function(R) Val(R, LocalPlayer.UserId) Btn(R, "Copy", function() Copy(tostring(LocalPlayer.UserId), "User ID") end) end)
+        Line(c, "Account age", nil, function(R) Val(R, LocalPlayer.AccountAge .. " days") end)
+        Line(c, "Membership", nil, function(R) Val(R, LocalPlayer.MembershipType.Name) end)
+    end
+
+    pages.profiles = function()
+        Heading("Profiles")
+        Note("Your profile picture is your Roblox avatar by default. Replace it, or the banner, with any picture.")
+        chat:_ProfilePreview(stack, O())
+        local c = Card()
+        local art = Lib:LoadArt()
+        local function Redo() if root.Parent and cur == "profiles" then Show("profiles") end end
+        Line(c, "Profile picture", art.pfp and "Custom picture" or "Using your Roblox avatar", function(R)
+            Btn(R, "Change", function(b) chat:ChooseArt("pfp", b, Redo) end, { primary = true })
+            if art.pfp then Btn(R, "Remove", function() Lib:SetArt("pfp", nil) Redo() end, { danger = true }) end
+        end)
+        Line(c, "Banner", art.banner and "Custom banner" or "Using your accent color", function(R)
+            Btn(R, "Change", function(b) chat:ChooseArt("banner", b, Redo) end, { primary = true })
+            if art.banner then Btn(R, "Remove", function() Lib:SetArt("banner", nil) Redo() end, { danger = true }) end
+        end)
+        Note("Pictures are saved on this device. Other people only see them if your chat server stores profile art.")
+    end
+
+    pages.notifs = function()
+        Heading("Notifications")
+        local c = Card()
+        local prefs, ex = Lib:LoadChatPrefs(), Lib:LoadExtras()
+        Line(c, "Popup notifications", "Mentions, friend requests and announcements", function(R)
+            Toggle(R, function() return Lib.NotifyEnabled ~= false end, function(v) Lib.NotifyEnabled = v Sync("NotifyOn", v) end)
+        end)
+        Line(c, "Read receipts (DMs)", "Show Read under your last DM, and let them see yours", function(R)
+            Toggle(R, function() return prefs.ReadReceipts end, function(v)
+                prefs.ReadReceipts = v Lib:SaveChatPrefs() Sync("ReadReceipts", v)
+                if not v then chat.ReadMark = nil end
+                pcall(function() chat:_PlaceRead() end)
+            end)
+        end)
+        Line(c, "Presence cards", "Show what game a friend is in, with a Join button", function(R)
+            Toggle(R, function() return ex.presence end, function(v)
+                ex.presence = v Lib:SaveExtras() Sync("PresenceCards", v)
+                pcall(function() chat:_UpdatePresence(true) end)
+                chat:_QueueSidebar()
+            end)
+        end)
+        Note("To mute a single chat: open its menu (the chevron in the chat header) > Notification Settings, or type /mute in a DM or group.")
+    end
+
+    pages.appearance = function()
+        Heading("Appearance")
+        local c = Card()
+        local sk, S = Lib:LoadSkin(), Lib:LoadChatState()
+        Line(c, "Message style", nil, function(R)
+            Seg(R, { "Discord", "Bubbles" }, function() return sk.MsgStyle end, function(v)
+                sk.MsgStyle = v Lib:SaveSkin() Sync("ChatMsgStyle", v)
+                pcall(function() chat:_ReloadMessages() end)
+            end)
+        end)
+        Line(c, "Chat layout", nil, function(R)
+            Seg(R, { "Discord", "Compact" }, function() return S.layout end, function(v)
+                S.layout = v Lib:SaveChatState() Sync("ChatLayout", v)
+                pcall(function() chat:_ApplyLayout() end)
+            end)
+        end)
+        Line(c, "Keep chat open when the menu closes", nil, function(R)
+            Toggle(R, function() return sk.Independent end, function(v) sk.Independent = v Lib:SaveSkin() Sync("ChatIndependent", v) Lib:SetVisible(Lib.Visible) end)
+        end)
+        Line(c, "Link previews", nil, function(R)
+            Toggle(R, function() return Lib.LinkPreviews ~= false end, function(v) Lib.LinkPreviews = v Sync("LinkPreviews", v) end)
+        end)
+        Line(c, "Load images automatically", nil, function(R)
+            Toggle(R, function() return Lib.ShowImages ~= false end, function(v) Lib.ShowImages = v Sync("AutoImages", v) end)
+        end)
+        Note("Colors, fonts, backgrounds and UI size are in the hub menu (Settings tab).")
+    end
+
+    pages.privacy = function()
+        Heading("Privacy & Blocking")
+        local c = Card()
+        Line(c, "Share my game in chat", "Lets people see your game and join your server", function(R)
+            Toggle(R, function() return Lib.ShareServer ~= false end, function(v) Lib.ShareServer = v Sync("ShareServer", v) end)
+        end)
+        New("TextLabel", { Text = "Blocked users", Font = Lib.FontBold, TextSize = 16, Size = UDim2.new(1, 0, 0, 24), TextXAlignment = LEFT, LayoutOrder = O(), Parent = stack })
+        local names = {}
+        for uid, nm in pairs(Lib.BlockList) do names[#names + 1] = { uid = uid, name = tostring(nm) } end
+        table.sort(names, function(a, b) return a.name:lower() < b.name:lower() end)
+        if #names == 0 then
+            Note("Nobody is blocked.")
+            return
+        end
+        local bc = Card()
+        for _, e in ipairs(names) do
+            Line(bc, e.name, "User ID " .. e.uid, function(R)
+                Btn(R, "Unblock", function()
+                    Lib:Unblock(e.uid)
+                    if root.Parent and cur == "privacy" then Show("privacy") end
+                end)
+            end)
+        end
+    end
+
+    Show = function(key)
+        if not pages[key] then key = "account" end
+        local same = key == cur
+        local y = scroll.CanvasPosition
+        cur = key
+        for _, c in ipairs(stack:GetChildren()) do
+            if not c:IsA("UIListLayout") and not c:IsA("UISizeConstraint") then c:Destroy() end
+        end
+        order = 0
+        titleL.Text = titles[key]
+        StyleNav()
+        local ok, err = pcall(pages[key])
+        if not ok then warn("[Aether] settings page: " .. tostring(err)) end
+        task.defer(function() if scroll.Parent then scroll.CanvasPosition = same and y or Vector2.zero end end)
+    end
+    Show(page or "account")
+end
+
+-- ==================== 6) wire it in ====================
+function Chat:_InitSettings()
+    local u = self._up
+    if not (u and u.name.Parent) then return end
+    local up = u.name.Parent
+    -- replace the old gear (it opened the hub menu, which is hidden behind fullscreen chat)
+    for _, c in ipairs(up:GetChildren()) do
+        if c:IsA("TextButton") and c.AnchorPoint == Vector2.new(1, 0.5) then c:Destroy() end
+    end
+    local gear = IconButton(up, "settings", "*", H(24), "User Settings", "Accent", 1)
+    gear.Button.AnchorPoint, gear.Button.Position, gear.Button.ZIndex = Vector2.new(1, 0.5), UDim2.new(1, -4, 0.5, 0), 3
+    gear.Button.Activated:Connect(function() self:OpenSettings() end)
+    self:_UpdateUserPanel()
+end
+
+P.PopMenu = Chat._PopMenu
+function Chat:_PopMenu(spec, anchor)
+    if anchor ~= nil and anchor == self.ChBtn and spec.Name ~= "Notifications" and spec.Sections and spec.Sections[2] then
+        table.insert(spec.Sections[2], { Text = "User Settings", Icon = "settings", Cb = function() self:OpenSettings() end })
+    end
+    return P.PopMenu(self, spec, anchor)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p63 then
+        chat._p63 = true
+        Lib:LoadArt()
+        local ok, err = pcall(function() chat:_InitSettings() end)
+        if not ok then warn("[Aether] user settings: " .. tostring(err)) end
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 6.3 =====================
+
 
 return Lib
