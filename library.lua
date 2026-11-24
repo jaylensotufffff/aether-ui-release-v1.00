@@ -16228,5 +16228,507 @@ end
 end
 -- ===================== end patch 6.1 =====================
 
+-- ===================== Aether patch 6.2: discord sidebar, quick switcher, user panel, profile banner =====================
+do
+local P = {}
+Lib.Version = "6.2.0"
+
+local function TitleCase(s)
+    return (tostring(s):lower():gsub("(%a)(%a*)", function(a, b) return a:upper() .. b end))
+end
+
+local function IsCaps(t)
+    return type(t) == "string" and t:match("^[A-Z][A-Z ]+$") ~= nil
+end
+
+-- ==================== 1) quick switcher (Find or start a chat) ====================
+function Chat:QuickSwitcher()
+    local me = LocalPlayer.UserId
+    if self._qs and self._qs.Parent then self._qs:Destroy() end
+    local Z, W, HH = 150, 440, 400
+
+    local dim = New("TextButton", { Name = "QuickSwitch", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.5,
+        BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+    self._qs = dim
+    local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.14, 0),
+        ZIndex = Z + 1, Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+    Corner(card, 10) Stroke(card)
+    local vp = Lib.Overlay.AbsoluteSize
+    local ui = New("UIScale", { Scale = (vp.X > 0 and vp.Y > 0) and math.min(1, vp.X / (W + 20), vp.Y / (HH + 140)) or 1, Parent = card })
+
+    local conn
+    local function Close()
+        if conn then conn:Disconnect() conn = nil end
+        if dim.Parent then dim:Destroy() end
+    end
+    dim.Activated:Connect(Close)
+    dim.Destroying:Connect(function() if conn then conn:Disconnect() conn = nil end end)
+
+    local bf = New("Frame", { Size = UDim2.new(1, -24, 0, H(44)), Position = UDim2.fromOffset(12, 12), BackgroundTransparency = 0, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(bf, 8) Stroke(bf, "Accent", 1.5, 0.15)
+    Lib.Icon("search", 17, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), ZIndex = Z + 3, Parent = bf }, "?")
+    local box = New("TextBox", { Text = "", PlaceholderText = "Where would you like to go?", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 16,
+        Size = UDim2.new(1, -48, 1, 0), Position = UDim2.fromOffset(40, 0), TextXAlignment = LEFT, ZIndex = Z + 3, Parent = bf })
+    local listTop = 12 + H(44) + 8
+    local list = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -(listTop + 30)), Position = UDim2.fromOffset(8, listTop), AutomaticCanvasSize = Y,
+        ScrollBarThickness = 3, ZIndex = Z + 2, Parent = card })
+    List(list, 2)
+    New("TextLabel", { Text = "Up / Down to move  ·  Enter to open  ·  Esc to close", TextSize = 10, Size = UDim2.new(1, -24, 0, 16),
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -8), TextXAlignment = LEFT, ZIndex = Z + 2, Theme = { TextColor3 = "Dim" }, Parent = card })
+
+    -- everything you can jump to
+    local entries = {}
+    local favs = Lib:LoadChatState().favs
+    for _, ch in ipairs(self.Channels) do
+        local kind = ch.kind or "pub"
+        local n = #(ch.members or {})
+        local sub = kind == "dm" and "Direct message" or (kind == "grp" and ("Group chat" .. (n > 0 and (" · " .. n .. " members") or "")) or "Channel")
+        entries[#entries + 1] = { room = ch.room, kind = kind, name = tostring(ch.name or "?"), sub = sub, ch = ch, uid = tonumber(ch.uid), unread = ch.unread or 0 }
+    end
+    for _, u in ipairs((self.Friends and self.Friends.friends) or {}) do
+        local uid = tonumber(u.uid)
+        local room = uid and uid ~= me and self:DMRoom(uid)
+        if room and not self:_RoomIndex(room) then
+            entries[#entries + 1] = { room = room, kind = "friend", uid = uid, u = u, unread = 0, sub = "Friend",
+                name = tostring((u.display and u.display ~= "") and u.display or u.name or uid) }
+        end
+    end
+    for i, e in ipairs(entries) do
+        e.o = i
+        e.score = (e.unread > 0 and 2 or 0) + (favs[e.room] and 1 or 0)
+    end
+    table.sort(entries, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        return a.o < b.o
+    end)
+
+    local function BaseRow(order, name, sub)
+        local row = New("TextButton", { Name = "Row", Text = "", Size = UDim2.new(1, 0, 0, H(44)), LayoutOrder = order, BackgroundTransparency = 1, ZIndex = Z + 3,
+            Theme = { BackgroundColor3 = "FieldHover" }, Parent = list })
+        Corner(row, 8)
+        local av = New("Frame", { Size = UDim2.fromOffset(32, 32), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), BackgroundTransparency = 0,
+            ZIndex = Z + 4, Theme = { BackgroundColor3 = "Field" }, Parent = row })
+        Corner(av, 16)
+        New("TextLabel", { Text = name, Font = Lib.FontBold, TextSize = 13, Size = UDim2.new(1, -110, 0, 16), Position = UDim2.fromOffset(52, 6), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 4, Parent = row })
+        New("TextLabel", { Text = sub, TextSize = 11, Size = UDim2.new(1, -110, 0, 14), Position = UDim2.fromOffset(52, 23), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 4, Theme = { TextColor3 = "Dim" }, Parent = row })
+        return row, av
+    end
+
+    local function Pick(e)
+        Close()
+        if e.kind == "friend" then
+            self:OpenDM(e.uid, e.u.name, e.name)
+        else
+            local idx = self:_RoomIndex(e.room)
+            if idx then self:SetChannel(idx) end
+        end
+    end
+
+    local rows = {}
+    for i, e in ipairs(entries) do
+        local row, av = BaseRow(i, e.name, e.sub)
+        if e.kind == "dm" or e.kind == "friend" then
+            local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, ZIndex = Z + 5, Parent = av })
+            Corner(img, 16)
+            if e.uid then GetAvatar(e.uid, function(u) if img.Parent then img.Image = u end end) end
+        elseif e.kind == "grp" then
+            local glyph = New("TextLabel", { Text = "«", Font = Lib.FontBold, TextSize = 16, Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Theme = { TextColor3 = "SubText" }, Parent = av })
+            pcall(function()
+                local entry = Lib:LoadGroupIcons()[tostring(e.ch.gid)]
+                if entry then
+                    local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, ZIndex = Z + 5, Parent = av })
+                    Corner(img, 16)
+                    self:_IconAsset(entry, e.room, function(a) if img.Parent then img.Image = a glyph.Text = "" end end)
+                else
+                    local ids = {}
+                    for _, m in ipairs(e.ch.members or {}) do
+                        local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+                        if id and id ~= me and #ids < 4 then ids[#ids + 1] = id end
+                    end
+                    if #ids > 0 then
+                        av.BackgroundTransparency = 1
+                        glyph.Text = ""
+                        self:_Collage(av, ids, 32, Z + 5)
+                    end
+                end
+            end)
+        else
+            New("TextLabel", { Text = "#", Font = Lib.FontBold, TextSize = 18, Size = UDim2.fromScale(1, 1), ZIndex = Z + 5, Theme = { TextColor3 = "SubText" }, Parent = av })
+        end
+        if e.unread > 0 then
+            local bd = New("Frame", { Size = UDim2.fromOffset(e.unread > 9 and 24 or 18, 16), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
+                BackgroundTransparency = 0, ZIndex = Z + 4, Theme = { BackgroundColor3 = "Bad" }, Parent = row })
+            Corner(bd, 8)
+            New("TextLabel", { Text = e.unread > 9 and "9+" or tostring(e.unread), Font = Lib.FontBold, TextSize = 10, Size = UDim2.fromScale(1, 1), TextColor3 = WHITE,
+                ZIndex = Z + 5, Parent = bd })
+        end
+        row.Activated:Connect(function() Pick(e) end)
+        rows[#rows + 1] = { row = row, hay = (e.name .. " " .. e.sub):lower(), act = function() Pick(e) end }
+    end
+
+    local vis, sel, extra = {}, 1, nil
+    local function Highlight()
+        for i, v in ipairs(vis) do v.row.BackgroundTransparency = (i == sel) and 0.55 or 1 end
+        local v = vis[sel]
+        if v and v.row.Parent then
+            local sc = math.max(ui.Scale, 0.01)
+            local top = v.row.AbsolutePosition.Y - list.AbsolutePosition.Y
+            local bot = top + v.row.AbsoluteSize.Y
+            if top < 0 then
+                list.CanvasPosition = Vector2.new(0, math.max(0, list.CanvasPosition.Y + top / sc))
+            elseif bot > list.AbsoluteSize.Y then
+                list.CanvasPosition = Vector2.new(0, list.CanvasPosition.Y + (bot - list.AbsoluteSize.Y) / sc)
+            end
+        end
+    end
+
+    local function Filter()
+        local q = (Trim(box.Text):lower():gsub("^@", ""))
+        vis = {}
+        for _, r in ipairs(rows) do
+            local show = q == "" or r.hay:find(q, 1, true) ~= nil
+            r.row.Visible = show
+            if show then vis[#vis + 1] = r end
+        end
+        if extra then extra:Destroy() extra = nil end
+        if #q >= 3 and q:match("^[%w_]+$") then
+            local row, av = BaseRow(100000, "Message @" .. q, "Look this Roblox user up and open a DM")
+            Lib.Icon("search", 16, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 5, Parent = av }, "?")
+            extra = row
+            local function Go()
+                Close()
+                self:ResolveUser(q, function(u)
+                    if not u then Lib:Notify({ Title = "Direct message", Text = "Couldn't find that Roblox user.", Type = "error" }) return end
+                    if tonumber(u.uid) == me then Lib:Notify({ Title = "Direct message", Text = "That's you.", Type = "warn" }) return end
+                    self:OpenDM(u.uid, u.name, u.display)
+                end)
+            end
+            row.Activated:Connect(Go)
+            vis[#vis + 1] = { row = row, act = Go }
+        end
+        sel = 1
+        Highlight()
+    end
+    box:GetPropertyChangedSignal("Text"):Connect(Filter)
+    box.FocusLost:Connect(function(enter)
+        if enter and vis[sel] then vis[sel].act() end
+    end)
+    conn = UIS.InputBegan:Connect(function(i)
+        if i.KeyCode == Enum.KeyCode.Down then
+            sel = math.min(#vis, sel + 1)
+            Highlight()
+        elseif i.KeyCode == Enum.KeyCode.Up then
+            sel = math.max(1, sel - 1)
+            Highlight()
+        elseif i.KeyCode == Enum.KeyCode.Escape then
+            Close()
+        end
+    end)
+    Filter()
+    if not Lib.Touch then task.defer(function() if box.Parent then box:CaptureFocus() end end) end
+end
+
+-- ==================== 2) sidebar: find button, nav rows, user panel ====================
+function Chat:_UpdateDiscordNav()
+    local n = self._nav
+    if not n then return end
+    local c = #self.Friends.incoming
+    n.frBadge.Visible = c > 0
+    n.frBadgeText.Text = c > 9 and "9+" or tostring(c)
+    local p = #(self.Pinned or {})
+    n.pinCount.Text = p > 0 and tostring(p) or ""
+end
+
+function Chat:_UpdateUserPanel()
+    local u = self._up
+    if not (u and u.name.Parent) then return end
+    local nm = Lib:LoadChatName()
+    if nm == "" then nm = LocalPlayer.DisplayName end
+    u.name.Text = nm
+    local st = self.State or "Connecting"
+    if st == "Connected" then
+        u.sub.Text = "Online · " .. tostring(self.Online or 0) .. " in chat"
+        u.dot.BackgroundColor3 = Lib.Theme.Good
+    elseif st == "Connecting" then
+        u.sub.Text = "Connecting..."
+        u.dot.BackgroundColor3 = Lib.Theme.Warn
+    else
+        u.sub.Text = st == "No server" and "No server" or "Offline"
+        u.dot.BackgroundColor3 = Lib.Theme.Bad
+    end
+end
+
+P.SetStatus = Chat.SetStatus
+function Chat:SetStatus(state, text)
+    P.SetStatus(self, state, text)
+    pcall(function() self:_UpdateUserPanel() end)
+end
+
+function Chat:_InitDiscordSidebar()
+    local sb = self._sb
+    if not sb or self._nav then return end
+    local card, list = sb.card, sb.list
+    card.ClipsDescendants = true
+    for _, c in ipairs(card:GetChildren()) do
+        if c:IsA("Frame") and c ~= list and c.AnchorPoint == Vector2.new(0.5, 1) then c.Visible = false end -- old Friends / Pins footer
+    end
+
+    local fh, nh, uh = H(28), H(28), H(44)
+    local y = 6
+
+    -- Find or start a chat
+    local find = New("TextButton", { Name = "FindBtn", Text = "", Size = UDim2.new(1, -12, 0, fh), Position = UDim2.fromOffset(6, y), BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(find, 5) Stroke(find, "Stroke", 1, 0.5)
+    Lib.Icon("search", 13, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0), Parent = find }, "?")
+    New("TextLabel", { Text = "Find or start a chat", TextSize = 11, Size = UDim2.new(1, -30, 1, 0), Position = UDim2.fromOffset(26, 0), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = find })
+    find.MouseEnter:Connect(function() Tween(find, { BackgroundColor3 = Lib.Theme.FieldHover }, 0.08) end)
+    find.MouseLeave:Connect(function() Tween(find, { BackgroundColor3 = Lib.Theme.Field }, 0.1) end)
+    find.Activated:Connect(function() self:QuickSwitcher() end)
+    Lib:AddTooltip(find, "Ctrl + K")
+    y = y + fh + 6
+
+    local nav = {}
+    local function NavRow(icon, text, fn)
+        local b = New("TextButton", { Name = "Nav", Text = "", Size = UDim2.new(1, -8, 0, nh), Position = UDim2.fromOffset(4, y), BackgroundTransparency = 1,
+            Theme = { BackgroundColor3 = "FieldHover" }, Parent = card })
+        Corner(b, 5)
+        local ico = Lib.Icon(icon, 16, "SubText", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), Parent = b })
+        local lbl = New("TextLabel", { Text = text, TextSize = 13, Size = UDim2.new(1, -70, 1, 0), Position = UDim2.fromOffset(34, 0), TextXAlignment = LEFT,
+            Theme = { TextColor3 = "SubText" }, Parent = b })
+        b.MouseEnter:Connect(function()
+            Tween(b, { BackgroundTransparency = 0.45 }, 0.06)
+            Tint(ico, Lib.Theme.Text, 0.08)
+            Tween(lbl, { TextColor3 = Lib.Theme.Text }, 0.08)
+        end)
+        b.MouseLeave:Connect(function()
+            Tween(b, { BackgroundTransparency = 1 }, 0.08)
+            Tint(ico, Lib.Theme.SubText, 0.1)
+            Tween(lbl, { TextColor3 = Lib.Theme.SubText }, 0.1)
+        end)
+        b.Activated:Connect(fn)
+        y = y + nh + 2
+        return b
+    end
+
+    local fr = NavRow("users", "Friends", function() self:ShowFriends(#self.Friends.incoming > 0 and "requests" or "friends") end)
+    local badge = New("Frame", { Size = UDim2.fromOffset(18, 16), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Visible = false,
+        BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Bad" }, Parent = fr })
+    Corner(badge, 8)
+    local badgeText = New("TextLabel", { Text = "0", Font = Lib.FontBold, TextSize = 10, Size = UDim2.fromScale(1, 1), TextColor3 = WHITE, Parent = badge })
+
+    local pins = NavRow("pin", "Pins", function() self:ShowPins() end)
+    local pinCount = New("TextLabel", { Text = "", TextSize = 11, Size = UDim2.fromOffset(30, nh), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0),
+        TextXAlignment = RIGHT, Theme = { TextColor3 = "Dim" }, Parent = pins })
+
+    New("Frame", { Size = UDim2.new(1, -16, 0, 1), Position = UDim2.fromOffset(8, y + 2), BackgroundTransparency = 0.5, Theme = { BackgroundColor3 = "Stroke" }, Parent = card })
+    local top = y + 8
+    list.Position = UDim2.fromOffset(2, top)
+    list.Size = UDim2.new(1, -4, 1, -(top + uh + 10))
+    self._nav = { frBadge = badge, frBadgeText = badgeText, pinCount = pinCount }
+
+    -- user panel at the bottom
+    local up = New("Frame", { Name = "UserPanel", Size = UDim2.new(1, -8, 0, uh), AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -4),
+        BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Bg" }, Parent = card })
+    Corner(up, 6) Stroke(up, "Stroke", 1, 0.5)
+    local hit = New("TextButton", { Text = "", Size = UDim2.new(1, -30, 1, 0), ZIndex = 2, Parent = up })
+    local av = New("ImageLabel", { Size = UDim2.fromOffset(28, 28), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 6, 0.5, 0), BackgroundTransparency = 0,
+        ScaleType = Enum.ScaleType.Crop, ZIndex = 3, Theme = { BackgroundColor3 = "Field" }, Parent = up })
+    Corner(av, 14)
+    GetAvatar(LocalPlayer.UserId, function(u) if av.Parent then av.Image = u end end)
+    local dot = New("Frame", { Size = UDim2.fromOffset(10, 10), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 3, 1, 3), ZIndex = 4,
+        BackgroundColor3 = Lib.Theme.Warn, Parent = av })
+    Corner(dot, 5) Stroke(dot, "Bg", 2, 0)
+    local nameL = New("TextLabel", { Text = "", Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, -72, 0, 16), Position = UDim2.fromOffset(40, 6), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3, Parent = up })
+    local subL = New("TextLabel", { Text = "", TextSize = 10, Size = UDim2.new(1, -72, 0, 14), Position = UDim2.fromOffset(40, 22), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3, Theme = { TextColor3 = "Dim" }, Parent = up })
+    local gear = IconButton(up, "settings", "*", H(24), "Settings", "Accent", 1)
+    gear.Button.AnchorPoint, gear.Button.Position, gear.Button.ZIndex = Vector2.new(1, 0.5), UDim2.new(1, -4, 0.5, 0), 3
+    gear.Button.Activated:Connect(function()
+        local w = Lib.MainWindow
+        if w and w._settingsTab then
+            Lib:SetVisible(true)
+            if w.Minimized then w:SetMinimized(false) end
+            w:SelectTab(w._settingsTab)
+        else
+            Lib:Notify({ Text = "Settings aren't available.", Type = "warn" })
+        end
+    end)
+    hit.Activated:Connect(function()
+        self:ShowProfile({ uid = LocalPlayer.UserId, name = LocalPlayer.Name, display = LocalPlayer.DisplayName })
+    end)
+    self._up = { name = nameL, sub = subL, dot = dot }
+    self:_UpdateUserPanel()
+    self:_UpdateDiscordNav()
+    self:_QueueSidebar()
+end
+
+-- ==================== 3) sidebar rows: member counts, title-case headers ====================
+function Chat:_DiscordRows()
+    local sb = self._sb
+    local list = sb and sb.list
+    if not (list and list.Parent) then return end
+    local used = {}
+    for _, c in ipairs(list:GetChildren()) do
+        if c:IsA("TextLabel") and IsCaps(c.Text) then
+            c.Text = TitleCase(c.Text)
+            c.TextSize = 11
+        elseif c:IsA("Frame") and c.Name ~= "PresenceCard" then
+            local l = c:FindFirstChildWhichIsA("TextLabel")
+            if l and IsCaps(l.Text) then
+                l.Text = TitleCase(l.Text)
+                l.TextSize = 11
+            end
+        elseif c.Name == "Ch" and c:IsA("TextButton") then
+            local nameLbl
+            for _, x in ipairs(c:GetChildren()) do
+                if x:IsA("TextLabel") and x.Position.X.Scale == 0 and x.Position.X.Offset >= 22 and x.Position.Y.Scale == 0 and x.Position.Y.Offset == 0 then nameLbl = x end
+            end
+            if nameLbl then
+                for _, ch in ipairs(self.Channels) do
+                    if ch.kind == "grp" and not used[ch] and tostring(ch.name) == nameLbl.Text then
+                        used[ch] = true
+                        local n = #(ch.members or {})
+                        if n > 0 then
+                            c.Size = UDim2.new(1, 0, 0, H(38))
+                            local px, sx = nameLbl.Position.X.Offset, nameLbl.Size.X
+                            nameLbl.Position = UDim2.fromOffset(px, 3)
+                            nameLbl.Size = UDim2.new(sx.Scale, sx.Offset, 0, 18)
+                            New("TextLabel", { Text = n .. (n == 1 and " Member" or " Members"), TextSize = 10, Size = UDim2.new(sx.Scale, sx.Offset, 0, 13),
+                                Position = UDim2.fromOffset(px, 20), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = c })
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function() self:_DiscordRows() end)
+    if not ok then warn("[Aether] sidebar rows: " .. tostring(err)) end
+    pcall(function() self:_UpdateDiscordNav() end)
+    pcall(function() self:_UpdateUserPanel() end)
+end
+
+-- Compact layout has no sidebar, so the chevron menu gets the entry
+P.PopMenu = Chat._PopMenu
+function Chat:_PopMenu(spec, anchor)
+    if anchor ~= nil and anchor == self.ChBtn and spec.Name ~= "Notifications" and not self.Wide and spec.Sections and spec.Sections[2] then
+        table.insert(spec.Sections[2], 1, { Text = "Find or Start a Chat", Icon = "search", Hint = "Ctrl K", Cb = function() self:QuickSwitcher() end })
+    end
+    return P.PopMenu(self, spec, anchor)
+end
+
+-- ==================== 4) profile card: banner, big avatar, status dot ====================
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    local ok, err = pcall(function()
+        local uid = tonumber(u.uid)
+        if not uid then return end
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c:IsA("TextButton") then dim = c end
+        end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        if not card then return end
+
+        local head
+        for _, c in ipairs(card:GetChildren()) do
+            if c:IsA("Frame") and c.LayoutOrder == 1 then head = c break end
+        end
+        local pic = head and head:FindFirstChildWhichIsA("ImageLabel")
+        if not pic then return end
+
+        -- banner (bleeds into the card's padding, flat at the bottom)
+        local base = Lib.Theme.Accent:Lerp(Color3.new(0, 0, 0), 0.3)
+        local holder = New("Frame", { Name = "Banner", Size = UDim2.new(1, 0, 0, 50), LayoutOrder = 0, BackgroundTransparency = 1, ZIndex = 102, Parent = card })
+        local fill = New("Frame", { Position = UDim2.fromOffset(-14, -14), Size = UDim2.new(1, 28, 1, 14), BackgroundColor3 = base, ZIndex = 102, Parent = holder })
+        Corner(fill, 8)
+        New("Frame", { Size = UDim2.new(1, 0, 0, 10), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0), BackgroundColor3 = base, ZIndex = 102, Parent = fill })
+
+        -- avatar overlaps the banner
+        head.Size = UDim2.new(1, 0, 0, 40)
+        pic.Size = UDim2.fromOffset(64, 64)
+        pic.Position = UDim2.fromOffset(0, -30)
+        pic.ZIndex = 104
+        local cr = pic:FindFirstChildOfClass("UICorner")
+        if cr then cr.CornerRadius = UDim.new(0, 32) end
+        Stroke(pic, "Bg", 4, 0)
+
+        local labels = {}
+        for _, c in ipairs(head:GetChildren()) do
+            if c:IsA("TextLabel") then labels[#labels + 1] = c end
+        end
+        table.sort(labels, function(a, b) return a.Position.Y.Offset < b.Position.Y.Offset end)
+        if labels[1] then
+            labels[1].Position = UDim2.fromOffset(76, 4)
+            labels[1].Size = UDim2.new(1, -84, 0, 18)
+        end
+        if labels[2] then
+            labels[2].Position = UDim2.fromOffset(76, 23)
+            labels[2].Size = UDim2.new(1, -84, 0, 14)
+        end
+
+        -- status dot
+        local online = uid == LocalPlayer.UserId or Players:GetPlayerByUserId(uid) ~= nil or (self.Friends.online[tostring(uid)] == true)
+        if not online then
+            for _, x in ipairs(self.Users or {}) do
+                if tonumber(x.uid) == uid then online = true break end
+            end
+        end
+        local dot = New("Frame", { Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -2, 1, -2), ZIndex = 106,
+            BackgroundColor3 = online and Lib.Theme.Good or Lib.Theme.Dim, Parent = pic })
+        Corner(dot, 8) Stroke(dot, "Bg", 3, 0)
+
+        -- wording
+        for _, d in ipairs(card:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                if d.Text == "Created" then d.Text = "Member since"
+                elseif d.Parent == card and IsCaps(d.Text) then
+                    d.Text = TitleCase(d.Text)
+                    d.TextSize = 11
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] profile banner: " .. tostring(err)) end
+end
+
+-- ==================== 5) hooks ====================
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p62 then
+        chat._p62 = true
+        local ok, err = pcall(function() chat:_InitDiscordSidebar() end)
+        if not ok then warn("[Aether] discord sidebar: " .. tostring(err)) end
+    end
+    return chat
+end
+
+Lib:Connect(UIS.InputBegan, function(i)
+    if i.KeyCode ~= Enum.KeyCode.K then return end
+    if not (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then return end
+    local c = Lib.ChatObj
+    if c and c.PanelObj and c.PanelObj._shown then c:QuickSwitcher() end
+end)
+
+end
+-- ===================== end patch 6.2 =====================
+
 
 return Lib
