@@ -413,6 +413,12 @@ Touch input is calibrated automatically (the offset is learned from your taps an
 
 A complete demo with every element, a combat and visuals setup and a components showcase is in [`example.lua`](example.lua).
 
+## Luicide icons
+
+https://raw.githubusercontent.com/Footagesus/Icons/refs/heads/main/lucide/dist/Icons.lua
+
+
+
 ## Open Source Code
 
 [`library.lua`](library.lua)
