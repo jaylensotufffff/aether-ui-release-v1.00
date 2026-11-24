@@ -16123,5 +16123,110 @@ end
 end
 -- ===================== end patch 6.0 =====================
 
+-- ===================== Aether patch 6.1: discord-style forwarded messages =====================
+do
+local P = {}
+Lib.Version = "6.1.0"
+
+-- wire format only (never drawn): "<arrow> Forwarded from Name · #channel\nbody"
+local ARROW = utf8.char(0x21AA)
+
+local function Parse(txt)
+    local line, rest = tostring(txt or ""):match("^" .. ARROW .. " Forwarded from ([^\n]*)\n?(.*)$")
+    if not line then return nil end
+    local who, where = line:match("^(.-) · (.+)$")
+    if not who then who, where = line, "" end
+    return who, where, rest
+end
+
+-- the text body never contains the header line any more
+P.Rich = Chat._Rich
+function Chat:_Rich(text, meta)
+    local who, _, rest = Parse(text)
+    return P.Rich(self, who and rest or text, meta)
+end
+
+function Chat:_FwdStyle(item, meta, who, where, rest)
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if not bubble or meta.fwdBuilt then return end
+    meta.fwdBuilt = true
+
+    -- header: [icon] Forwarded
+    local head = New("Frame", { Name = "FwdHead", Size = UDim2.new(1, 0, 0, H(16)), LayoutOrder = 1, BackgroundTransparency = 1, Parent = bubble })
+    Lib.Icon("forward", 13, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Parent = head }, ">")
+    New("TextLabel", { RichText = true, Text = "<i>Forwarded</i>", TextSize = 12, Size = UDim2.new(1, -18, 1, 0), Position = UDim2.fromOffset(18, 0),
+        TextXAlignment = LEFT, Theme = { TextColor3 = "Dim" }, Parent = head })
+
+    -- quote block with the grey bar
+    local block = New("Frame", { Name = "FwdBlock", Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, LayoutOrder = 2, Parent = bubble })
+    local bar = New("Frame", { Name = "Bar", Size = UDim2.new(0, 3, 0, 0), Theme = { BackgroundColor3 = "Dim" }, Parent = block })
+    Corner(bar, 2)
+    local inner = New("Frame", { Name = "Inner", Size = UDim2.new(1, -12, 0, 0), Position = UDim2.fromOffset(12, 0), AutomaticSize = Y,
+        BackgroundTransparency = 1, Parent = block })
+    List(inner, 3)
+
+    -- the original text / image live inside the block
+    meta.body.Parent = inner
+    meta.body.Visible = rest ~= ""
+    local img = bubble:FindFirstChild("Image")
+    if img then img.Parent = inner end
+
+    -- footer: [icon] from Name · #channel
+    local foot = New("Frame", { Name = "FwdFoot", Size = UDim2.new(1, 0, 0, H(16)), LayoutOrder = 400, BackgroundTransparency = 1, Parent = inner })
+    Lib.Icon(where:sub(1, 1) == "#" and "hash" or "user", 12, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Parent = foot }, "#")
+    New("TextLabel", { RichText = true, TextSize = 11, Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(16, 0), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = foot,
+        Text = "from <b>" .. RichEsc(who) .. "</b>" .. (where ~= "" and (" · " .. RichEsc(where)) or "") })
+
+    -- bar + block follow the real content height
+    local function Fit()
+        if not (inner.Parent and block.Parent) then return end
+        local h = math.ceil(inner.AbsoluteSize.Y / math.max(Lib.Scale, 0.01))
+        block.Size = UDim2.new(1, 0, 0, h)
+        bar.Size = UDim2.new(0, 3, 0, h)
+    end
+    inner:GetPropertyChangedSignal("AbsoluteSize"):Connect(Fit)
+    task.defer(Fit)
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local last = self.Items[#self.Items]
+    local res = P.AddMessage(self, msg)
+    local item = self.Items[#self.Items]
+    local meta = item and item ~= last and self.Meta[item]
+    if meta and meta.msg == msg and not meta.isCard then
+        local who, where, rest = Parse(meta.txt)
+        if who then
+            local ok, err = pcall(function()
+                self:_FwdStyle(item, meta, who, where, rest)
+                self:_WidenItem(item)
+            end)
+            if not ok then warn("[Aether] forwarded style: " .. tostring(err)) end
+        end
+    end
+    return res
+end
+
+-- searching highlights only the real text, not the header line
+P.ApplySearch = Chat.ApplySearch
+function Chat:ApplySearch(keep)
+    local tmp = {}
+    for _, it in ipairs(self.Items) do
+        local m = self.Meta[it]
+        if m and m.fwdBuilt and m.s1 == nil then
+            local _, _, rest = Parse(m.txt)
+            if rest then m.s1 = rest tmp[#tmp + 1] = m end
+        end
+    end
+    local ok, err = pcall(P.ApplySearch, self, keep)
+    for _, m in ipairs(tmp) do m.s1 = nil end
+    if not ok then warn("[Aether] search: " .. tostring(err)) end
+end
+
+end
+-- ===================== end patch 6.1 =====================
+
 
 return Lib
