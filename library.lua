@@ -3779,7 +3779,7 @@ local JoinWhy = {
         GameFull = "That server is full right now.",
         GameEnded = "That server has shut down or is closing.",
         GameNotFound = "That server doesn't exist anymore, or the game isn't public.",
-        Unauthorized = "You aren't allowed to join it. It's probably a private server, or the game limits who can join.",
+        Unauthorized = "You aren't allowed to join it, or the game limits who can join.",
         Flooded = "Roblox is rate limiting teleports. Wait about 30 seconds and try again.",
         IsTeleporting = "You are already teleporting. Wait for that one to finish.",
         Failure = "Roblox reported a general teleport failure.",
@@ -4879,15 +4879,12 @@ function Chat:ShowProfile(u)
         end
         Section("Game")
         local place, job = tonumber(info.place), info.job and tostring(info.job) or nil
-        local priv = info.priv == true or info.priv == 1 or info.priv == "1"
         local sameServer = (plr ~= nil) or (job ~= nil and job == game.JobId)
         local status
         if sameServer then status = "In your server"
-        elseif priv then status = "In a private server"
         elseif place and job and job ~= "" then status = "In a public server"
         else status = "Unknown" end
         local statRow = Row("Status", status)
-        if priv and not sameServer then statRow.TextColor3 = Lib.Theme.Warn end
         local state = { full = false }
         if place then
                 local gn = Row("Game", "...")
@@ -4897,7 +4894,7 @@ function Chat:ShowProfile(u)
                 end)
                 Row("Place ID", place)
                 if job and job ~= "" then Row("Job ID", Short(job, 16)) end
-                if not sameServer and not priv and job and job ~= "" then
+                if not sameServer and job and job ~= "" then
                         local fill = Row("Players", "checking...")
                         Lib:CheckServer(place, job, function(r, why)
                                 if not fill.Parent then return end
@@ -4916,11 +4913,6 @@ function Chat:ShowProfile(u)
                         Theme = { TextColor3 = "Dim" }, Parent = card })
                 Wrap(l, nil, nil, 14)
         end
-        if priv and not sameServer then
-                local l = New("TextLabel", { Text = "They're in a private server. Roblox doesn't let you join those by server id. Ask them for the invite link.", TextSize = 11, Size = UDim2.new(1, 0, 0, 14),
-                        TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = O(), ZIndex = 102, Theme = { TextColor3 = "Warn" }, Parent = card })
-                Wrap(l, nil, nil, 14)
-        end
         local function BtnRow(list)
                 local n = #list
                 local bar = New("Frame", { Size = UDim2.new(1, 0, 0, H(28)), BackgroundTransparency = 1, LayoutOrder = O(), ZIndex = 102, Parent = card })
@@ -4932,7 +4924,7 @@ function Chat:ShowProfile(u)
                         b.Activated:Connect(function() bi.Func(b) end)
                 end
         end
-        local canJoin = place and job and job ~= "" and not sameServer and not priv
+        local canJoin = place and job and job ~= "" and not sameServer
         if canJoin then
                 BtnRow({
                         { Text = "Join game", Primary = true, Func = function()
@@ -5189,7 +5181,6 @@ function Chat:_Do(path, query, method, body, room)
         if Lib.ShareServer ~= false then
                 table.insert(q, "place=" .. UrlEncode(game.PlaceId))
                 table.insert(q, "job=" .. UrlEncode(game.JobId))
-                table.insert(q, "priv=" .. (game.PrivateServerId ~= "" and "1" or "0"))
         end
         for k, v in pairs(query or {}) do table.insert(q, k .. "=" .. UrlEncode(v)) end
         local req = { Url = cfg.Url .. path .. "?" .. table.concat(q, "&"), Method = method or "GET", Headers = {} }
@@ -11940,10 +11931,6 @@ function Chat:JoinFriend(u)
     end
     self:RefreshFriends(function()
         local f = self.Friends.byId[uid] or u
-        if f.priv == true or f.priv == 1 or f.priv == "1" then
-            Lib:Notify({ Title = "Join", Text = name .. " is in a private server. Ask them for the invite link.", Type = "warn", Duration = 5 })
-            return
-        end
         local place, job = tonumber(f.place), f.job and tostring(f.job)
         if not place or not job or job == "" then
             Lib:Notify({ Title = "Join", Text = name .. " isn't sharing a server right now.", Type = "warn" })
@@ -11975,8 +11962,7 @@ local function AddJoin(self, d)
     local u = lab and self:_FriendByLabel(lab.Text)
     if not u or not self.Friends.online[tostring(u.uid)] then return end
     local place, job = tonumber(u.place), u.job and tostring(u.job)
-    local priv = u.priv == true or u.priv == 1 or u.priv == "1"
-    if not place or not job or job == "" or job == game.JobId or priv then return end
+    if not place or not job or job == "" or job == game.JobId then return end
     for _, c in ipairs(row:GetChildren()) do
         if c:IsA("TextLabel") then c.Size = UDim2.new(c.Size.X.Scale, c.Size.X.Offset - 58, 0, c.Size.Y.Offset) end
     end
@@ -13306,10 +13292,6 @@ function Chat:_BuildJoinCard(item, meta, msg, c)
 end
 
 function Chat:ShareServer()
-    if game.PrivateServerId ~= "" then
-        Lib:Notify({ Title = "Join me", Text = "You're in a private server. Roblox only lets people in with an invite link, not a server id, so a card can't work here.", Type = "warn", Duration = 6 })
-        return
-    end
     if game.JobId == "" then
         Lib:Notify({ Title = "Join me", Text = "There's no live server to share (Studio?).", Type = "warn" })
         return
@@ -14788,9 +14770,8 @@ function Chat:_PeerPresence()
     if live then for k, v in pairs(live) do if v ~= nil then src[k] = v end end end
     local place, job = tonumber(src.place), src.job and tostring(src.job) or nil
     if not place or place == 0 or not job or job == "" then return nil end
-    local priv = src.priv == true or src.priv == 1 or src.priv == "1"
     local same = job == game.JobId or Players:GetPlayerByUserId(tonumber(ch.uid) or 0) ~= nil
-    return { uid = ch.uid, name = tostring(ch.name), place = place, job = job, priv = priv, same = same, friend = f }
+    return { uid = ch.uid, name = tostring(ch.name), place = place, job = job, same = same, friend = f }
 end
 
 function Chat:_InitPresence()
@@ -14842,8 +14823,6 @@ function Chat:_PaintPresence()
     local sub
     if p.same then
         sub = "In your server"
-    elseif p.priv then
-        sub = "Private server · ask them for an invite link"
     elseif pi.size then
         local full = pi.size.max > 0 and pi.size.playing >= pi.size.max
         sub = pi.size.playing .. "/" .. pi.size.max .. " players · Public server" .. (full and " · FULL" or "")
@@ -14851,7 +14830,7 @@ function Chat:_PaintPresence()
         sub = "Public server"
     end
     self._presSub.Text = sub
-    local canJoin = not p.same and not p.priv
+    local canJoin = not p.same
     self._presJoin.Visible = canJoin
     local w = canJoin and -96 or -32
     self._presGame.Size = UDim2.new(1, w, 0, 15)
@@ -14868,7 +14847,7 @@ function Chat:_UpdatePresence(force)
         if was then bar.Visible = false self:_Relayout() end
         return
     end
-    local key = p.uid .. ":" .. p.place .. ":" .. p.job .. ":" .. tostring(p.priv)
+    local key = p.uid .. ":" .. p.place .. ":" .. p.job
     local changed = force or key ~= self._presKey
     self._pres, self._presKey = p, key
     if changed then
@@ -14880,7 +14859,7 @@ function Chat:_UpdatePresence(force)
             end
         end)
     end
-    if not p.priv and not p.same then
+    if not p.same then
         Lib:ServerSize(p.place, p.job, function(info)
             if self._presKey == key and bar.Parent then
                 self._pi.size = info
@@ -14948,9 +14927,8 @@ function Chat:_RenderSidebar()
         for i = 1, math.min(#friends, 4) do
             local u = friends[i]
             local place, job = tonumber(u.place), tostring(u.job)
-            local priv = u.priv == true or u.priv == 1 or u.priv == "1"
             local same = job == game.JobId
-            local canJoin = not priv and not same
+            local canJoin = not same
             local card = New("Frame", { Name = "PresenceCard", Size = UDim2.new(1, 0, 0, H(40)), LayoutOrder = 5000 + i, BackgroundTransparency = 0,
                 Theme = { BackgroundColor3 = "Field" }, Parent = L })
             Corner(card, 5)
@@ -14963,7 +14941,6 @@ function Chat:_RenderSidebar()
                 if not sub.Parent then return end
                 local t = gname or "..."
                 if same then t = t .. " · your server"
-                elseif priv then t = t .. " · private"
                 elseif size then t = t .. " · " .. size.playing .. "/" .. size.max end
                 sub.Text = t
             end
@@ -18407,6 +18384,7 @@ function Chat:_PatchSettingsButtons(root)
         b.Visible = false
         local nb = New("TextButton", { Text = "Change", TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), BackgroundTransparency = 0, LayoutOrder = -1,
             Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = R })
+        nb:SetAttribute("p65", true) -- re-entrancy fix: the DescendantAdded hook below must never re-process this button
         Corner(nb, 5) Pad(nb, 12, 0, 12, 0)
         nb.Activated:Connect(function()
             if kind == "chat" then chat:ChooseBg("chat", nb, function() chat:OpenSettings("chat") end)
@@ -18414,7 +18392,10 @@ function Chat:_PatchSettingsButtons(root)
         end)
     end
     for _, d in ipairs(root:GetDescendants()) do Fix(d) end
-    root.DescendantAdded:Connect(function(d) task.defer(function() Fix(d) end) end)
+    root.DescendantAdded:Connect(function(d)
+        if d:GetAttribute("p65") then return end
+        task.defer(function() if d.Parent then Fix(d) end end)
+    end)
 end
 
 P.OpenSettings = Chat.OpenSettings
@@ -18984,5 +18965,2408 @@ end
 
 end
 -- ===================== end patch 6.6 =====================
+
+-- ===================== Aether patch 6.7 =====================
+do
+local P = {}
+Lib.Version = "6.7.0"
+
+local function CleanS(s, n)
+    s = tostring(s or ""):gsub("%c", " ")
+    s = Trim(s):gsub("%s+", " ")
+    local len = utf8.len(s)
+    if len and len > n then s = s:sub(1, utf8.offset(s, n + 1) - 1) elseif not len then s = s:sub(1, n) end
+    return s
+end
+
+local function H32(s)
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    return string.format("%08x", h)
+end
+
+local function FmtLeft(sec)
+    sec = math.max(0, math.floor(sec))
+    if sec >= 3600 then return math.floor(sec / 3600 + 0.5) .. "h left" end
+    return math.max(1, math.floor(sec / 60 + 0.5)) .. "m left"
+end
+
+-- ==================== 1) notification prefs: default + per chat + timed mutes ====================
+Lib.NotifPrefs = { default = "all", rooms = {}, untilT = {} }
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/chatnotif2.json" end
+    local function Ok(m) return m == "all" or m == "mentions" or m == "none" end
+
+    function Lib:LoadNotifPrefs()
+        if loaded then return self.NotifPrefs end
+        loaded = true
+        local N = self.NotifPrefs
+        if FsOk() then
+            pcall(function()
+                local old = self.ConfigFolder .. "/chatnotif.json"
+                if not isfile(old) then return end
+                local d = HttpService:JSONDecode(readfile(old))
+                if type(d) == "table" then
+                    for k, v in pairs(d) do if type(k) == "string" and (v == "mentions" or v == "none") then N.rooms[k] = v end end
+                end
+            end)
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                if Ok(d.default) then N.default = d.default end
+                if type(d.rooms) == "table" then
+                    for k, v in pairs(d.rooms) do if type(k) == "string" and Ok(v) then N.rooms[k] = v end end
+                end
+                if type(d.untilT) == "table" then
+                    for k, v in pairs(d.untilT) do if type(k) == "string" and tonumber(v) then N.untilT[k] = tonumber(v) end end
+                end
+            end)
+        end
+        return N
+    end
+
+    function Lib:SaveNotifPrefs()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.5, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                local N = Lib.NotifPrefs
+                writefile(Path(), HttpService:JSONEncode({ default = N.default, rooms = N.rooms, untilT = N.untilT }))
+            end)
+        end)
+    end
+
+    function Lib:GetNotif(room)
+        local N = self:LoadNotifPrefs()
+        local u = N.untilT[room]
+        if u and os.time() >= u then
+            N.untilT[room], N.rooms[room] = nil, nil
+            self:SaveNotifPrefs()
+            local c = self.ChatObj
+            if c then task.defer(function() pcall(function() c:_RefreshChannel() c:_QueueSidebar() end) end) end
+        end
+        return N.rooms[room] or N.default
+    end
+
+    function Lib:MuteLeft(room)
+        local N = self:LoadNotifPrefs()
+        local u = N.untilT[room]
+        if u and u > os.time() and (N.rooms[room] == "none") then return u - os.time() end
+        return nil
+    end
+
+    function Lib:SetNotif(room, mode, secs)
+        local N = self:LoadNotifPrefs()
+        if Ok(mode) then
+            N.rooms[room] = (mode == N.default and not secs) and nil or mode
+            N.untilT[room] = (mode == "none" and secs and secs > 0) and (os.time() + secs) or nil
+        else
+            N.rooms[room], N.untilT[room] = nil, nil
+        end
+        self:SaveNotifPrefs()
+        local c = self.ChatObj
+        if c then pcall(function() c:_RefreshChannel() c:_QueueSidebar() end) end
+    end
+
+    function Lib:SetNotifDefault(mode)
+        if not Ok(mode) then return end
+        local N = self:LoadNotifPrefs()
+        N.default = mode
+        for k, v in pairs(N.rooms) do if v == mode and not N.untilT[k] then N.rooms[k] = nil end end
+        self:SaveNotifPrefs()
+        local c = self.ChatObj
+        if c then pcall(function() c:_RefreshChannel() c:_QueueSidebar() end) end
+    end
+
+    function Lib:ResetNotifOverrides()
+        local N = self:LoadNotifPrefs()
+        N.rooms, N.untilT = {}, {}
+        self:SaveNotifPrefs()
+        local c = self.ChatObj
+        if c then pcall(function() c:_RefreshChannel() c:_QueueSidebar() end) end
+    end
+end
+
+function Chat:NotifMenu(ch, anchor)
+    ch = ch or self.Channels[self.ChIndex]
+    if not ch then return end
+    local mode = Lib:GetNotif(ch.room)
+    local left = Lib:MuteLeft(ch.room)
+    local label = ch.kind == "dm" and ("@" .. tostring(ch.name)) or (ch.kind == "grp" and ("«" .. tostring(ch.name) .. "»") or ("#" .. tostring(ch.name)))
+    local function Do(m, secs, msg)
+        return function()
+            Lib:SetNotif(ch.room, m, secs)
+            if m ~= "all" then ch.unread = 0 end
+            Lib:Notify({ Title = "Notifications", Text = msg, Type = "success", Duration = 2.5 })
+        end
+    end
+    local A = {
+        { Text = "All Messages", Icon = "bell", Hint = (mode == "all") and "✓" or nil, Cb = Do("all", nil, "You'll be notified for every message in " .. label .. ".") },
+        { Text = "Only @mentions", Icon = "at-sign", Hint = (mode == "mentions") and "✓" or nil, Cb = Do("mentions", nil, "Only mentions and replies in " .. label .. ".") },
+        { Text = left and ("Muted · " .. FmtLeft(left)) or "Mute Until I Turn It On", Icon = "bell-off", Hint = (mode == "none" and not left) and "✓" or nil,
+            Cb = Do("none", nil, label .. " is muted.") },
+    }
+    local B = {
+        { Text = "Mute for 1 Hour", Icon = "clock", Cb = Do("none", 3600, label .. " muted for 1 hour.") },
+        { Text = "Mute for 8 Hours", Icon = "clock", Cb = Do("none", 28800, label .. " muted for 8 hours.") },
+        { Text = "Mute for 24 Hours", Icon = "clock", Cb = Do("none", 86400, label .. " muted for 24 hours.") },
+    }
+    self:_PopMenu({ Name = "Notifications", Sub = label, Glyph = "🔔", Sections = { A, B } }, anchor or self.ChBtn)
+end
+
+-- ==================== 2) right-click menu on sidebar rows ====================
+function Chat:_CloseDM(ch)
+    local idx = self:_RoomIndex(ch.room)
+    if not idx then return end
+    self.HiddenDMs[ch.room] = ch.lastId or 0
+    table.remove(self.Channels, idx)
+    if self.ChIndex == idx then self.ChIndex = -1 self:SetChannel(1)
+    elseif self.ChIndex > idx then self.ChIndex = self.ChIndex - 1 self:_RefreshChannel()
+    else self:_RefreshChannel() end
+    self:SaveConvos()
+end
+
+function Chat:ConvoMenu(ch, anchor)
+    if not (ch and anchor) then return end
+    local S = Lib:LoadChatState()
+    local fav = S.favs[ch.room] == true
+    local mode = Lib:GetNotif(ch.room)
+    local left = Lib:MuteLeft(ch.room)
+    local A, B, C, D = {}, {}, {}, {}
+    local spec = { Sections = { A, B, C, D } }
+    local function Add(sec, text, icon, cb, o) table.insert(sec, { Text = text, Icon = icon, Cb = cb, Danger = o and o.Danger, Hint = o and o.Hint }) end
+    local nm = tostring(ch.name or "?")
+    local label
+    if ch.kind == "dm" then
+        spec.Name, spec.Uid, spec.Sub, label = nm, ch.uid, "Direct message", "@" .. nm
+    elseif ch.kind == "grp" then
+        spec.Name, spec.Glyph, spec.Group, spec.Sub, label = nm, "«", ch, "Group chat", "«" .. nm .. "»"
+    else
+        spec.Name, spec.Glyph, spec.Sub, label = "#" .. nm, "#", "Channel", "#" .. nm
+    end
+    local function Set(m, secs, msg)
+        return function()
+            Lib:SetNotif(ch.room, m, secs)
+            if m ~= "all" then ch.unread = 0 end
+            Lib:Notify({ Title = "Notifications", Text = msg, Type = "success", Duration = 2.5 })
+        end
+    end
+    Add(A, "Open", "message-square", function() local i = self:_RoomIndex(ch.room) if i then self:SetChannel(i) end end)
+    Add(A, "Mark as Read", "check", function()
+        ch.unread = 0
+        S.reads[ch.room] = tonumber(ch.lastId) or S.reads[ch.room]
+        Lib:SaveChatState()
+        self:_RefreshChannel()
+    end)
+    Add(A, fav and "Remove Favorite" or "Mark as Favorite", "star", function() Lib:SetFav(ch.room, not fav) end)
+    Add(B, "All Messages", "bell", Set("all", nil, "You'll be notified for every message in " .. label .. "."), { Hint = (mode == "all") and "✓" or nil })
+    Add(B, "Only @mentions", "at-sign", Set("mentions", nil, "Only mentions and replies in " .. label .. "."), { Hint = (mode == "mentions") and "✓" or nil })
+    Add(B, left and ("Muted · " .. FmtLeft(left)) or "Mute Until I Turn It On", "bell-off", Set("none", nil, label .. " is muted."),
+        { Hint = (mode == "none" and not left) and "✓" or nil })
+    Add(C, "Mute for 1 Hour", "clock", Set("none", 3600, label .. " muted for 1 hour."))
+    Add(C, "Mute for 8 Hours", "clock", Set("none", 28800, label .. " muted for 8 hours."))
+    Add(C, "Mute for 24 Hours", "clock", Set("none", 86400, label .. " muted for 24 hours."))
+    if ch.kind == "dm" then
+        local u = { uid = ch.uid, name = ch.name, display = ch.name }
+        Add(D, "View Profile", "user", function() self:ShowProfile(u) end)
+        Add(D, "Close DM", "x", function() self:_CloseDM(ch) end, { Danger = true })
+    elseif ch.kind == "grp" then
+        Add(D, "Leave Group", "log-out", function() self:LeaveGroup(ch) end, { Danger = true })
+    end
+    self:_PopMenu(spec, anchor)
+end
+
+-- ==================== 3) status / presence ====================
+local ModeInfo = { online = { "Online", "Good" }, idle = { "Idle", "Warn" }, dnd = { "Do Not Disturb", "Bad" }, invisible = { "Invisible", "Dim" } }
+Lib.Status = { mode = "online", text = "", emoji = "", untilT = nil }
+
+function Lib:StatusColor(m)
+    local i = ModeInfo[m]
+    return Lib.Theme[i and i[2] or "Dim"]
+end
+function Lib:StatusLabel(m) return ModeInfo[m] and ModeInfo[m][1] or "Online" end
+
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/status.json" end
+
+    function Lib:LoadStatus()
+        if loaded then return self.Status end
+        loaded = true
+        local S = self.Status
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                if ModeInfo[d.m] then S.mode = d.m end
+                if type(d.t) == "string" then S.text = CleanS(d.t, 48) end
+                if type(d.e) == "string" and #d.e <= 32 and utf8.len(d.e) then S.emoji = d.e end
+                if tonumber(d.u) then S.untilT = tonumber(d.u) end
+            end)
+        end
+        if S.untilT and os.time() >= S.untilT then S.text, S.emoji, S.untilT = "", "", nil end
+        return S
+    end
+
+    function Lib:SaveStatus()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.5, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                local S = Lib.Status
+                writefile(Path(), HttpService:JSONEncode({ m = S.mode, t = S.text, e = S.emoji, u = S.untilT }))
+            end)
+        end)
+    end
+end
+
+function Lib:StatusLine()
+    local S = self:LoadStatus()
+    local t = (S.emoji ~= "" and (S.emoji .. " ") or "") .. S.text
+    return Trim(t)
+end
+
+function Lib:_PaintStatusDot()
+    local w = self.MainWindow
+    if w and w._stDot and w._stDot.Parent then w._stDot.BackgroundColor3 = self:StatusColor(self:LoadStatus().mode) end
+end
+
+function Lib:_StatusChanged()
+    self:_PaintStatusDot()
+    local c = self.ChatObj
+    if c then
+        pcall(function() c:_UpdateUserPanel() end)
+        task.spawn(function() pcall(function() c:_PollOnce() end) end)
+    end
+end
+
+function Lib:SetStatusMode(m)
+    if not ModeInfo[m] then return end
+    local S = self:LoadStatus()
+    S.mode = m
+    self:SaveStatus()
+    self:_StatusChanged()
+end
+
+function Lib:SetCustomStatus(emoji, text, secs)
+    local S = self:LoadStatus()
+    emoji = tostring(emoji or "")
+    if #emoji > 32 or not utf8.len(emoji) then emoji = "" end
+    S.emoji, S.text = emoji, CleanS(text, 48)
+    S.untilT = (secs and secs > 0 and (S.text ~= "" or S.emoji ~= "")) and (os.time() + secs) or nil
+    self:SaveStatus()
+    self:_StatusChanged()
+end
+
+-- do not disturb silences mention / DM / friend popups
+P.Notify = Lib.Notify
+function Lib:Notify(a, b, c)
+    if type(a) == "table" and (a.Type == "info" or a.Type == "warn") and self:LoadStatus().mode == "dnd" then
+        local t = tostring(a.Title or "")
+        if t:find("^Mentioned by") or t:find("^Reply from") or t:find("^DM · ") or t:find("^Group · ") or t:find("^Friend request") then return end
+    end
+    return P.Notify(self, a, b, c)
+end
+
+function Chat:_StatusOf(uid)
+    uid = tonumber(uid)
+    if not uid then return nil end
+    if uid == LocalPlayer.UserId then
+        local S = Lib:LoadStatus()
+        return S.mode, Lib:StatusLine()
+    end
+    local function From(t)
+        if type(t) ~= "table" then return nil end
+        local m = t.st or t.status
+        local x = t.stx or t.statustext
+        if ModeInfo[m] or (type(x) == "string" and x ~= "") then return ModeInfo[m] and m or "online", type(x) == "string" and x or "" end
+    end
+    for _, u in ipairs(self.Users or {}) do
+        if tonumber(u.uid) == uid then
+            local m, x = From(u)
+            if m then return m, x end
+        end
+    end
+    local f = self.Friends and self.Friends.byId[tostring(uid)]
+    if f then
+        local m, x = From(f)
+        if m then return m, x end
+    end
+    return nil
+end
+
+function Chat:StatusMenu(anchor)
+    local S = Lib:LoadStatus()
+    local function M(mode, icon)
+        return { Text = ModeInfo[mode][1], Icon = icon, Hint = (S.mode == mode) and "✓" or nil, Cb = function() Lib:SetStatusMode(mode) end }
+    end
+    local A = { M("online", "circle"), M("idle", "moon"), M("dnd", "circle-minus"), M("invisible", "eye-off") }
+    local B = { { Text = "Set Custom Status", Icon = "smile", Cb = function() self:StatusEditor() end } }
+    if Lib:StatusLine() ~= "" then
+        table.insert(B, { Text = "Clear Custom Status", Icon = "x", Cb = function() Lib:SetCustomStatus("", "", 0) end })
+    end
+    local C = {
+        { Text = "View Profile", Icon = "user", Cb = function() self:ShowProfile({ uid = LocalPlayer.UserId, name = LocalPlayer.Name, display = LocalPlayer.DisplayName }) end },
+        { Text = "User Settings", Icon = "settings", Cb = function() self:OpenSettings() end },
+    }
+    local nm = Lib:LoadChatName()
+    if nm == "" then nm = LocalPlayer.DisplayName end
+    local line = Lib:StatusLine()
+    self:_PopMenu({ Name = nm, Uid = LocalPlayer.UserId, Sub = ModeInfo[S.mode][1] .. (line ~= "" and (" · " .. line) or ""), Sections = { A, B, C } }, anchor)
+end
+
+local function TrimLen(t, n)
+    local len = utf8.len(t)
+    if len and len > n then return t:sub(1, utf8.offset(t, n + 1) - 1) end
+    if not len then return t:sub(1, n) end
+    return t
+end
+
+function Chat:StatusEditor()
+    local S = Lib:LoadStatus()
+    local draft = { emoji = S.emoji or "", text = S.text or "", secs = (S.text ~= "" and not S.untilT) and 0 or 86400 }
+    local opts = { { "Don't clear", 0 }, { "30 minutes", 1800 }, { "1 hour", 3600 }, { "4 hours", 14400 }, { "24 hours", 86400 } }
+    local function OptLabel() for _, o in ipairs(opts) do if o[2] == draft.secs then return o[1] end end return "24 hours" end
+    local Z, W, HH = 76, 380, 470
+    local dim = New("TextButton", { Name = "StatusEditor", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.45,
+        BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+    local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        ZIndex = Z + 1, Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+    Corner(card, 10) Stroke(card)
+    local vp = Lib.Overlay.AbsoluteSize
+    New("UIScale", { Scale = (vp.X > 0 and vp.Y > 0) and math.min(1, vp.X / (W + 20), vp.Y / (HH + 20)) or 1, Parent = card })
+    local function Close() if dim.Parent then dim:Destroy() end end
+    dim.Activated:Connect(Close)
+
+    New("TextLabel", { Text = "Set your status", Font = Lib.FontBold, TextSize = 18, Size = UDim2.new(1, -60, 0, 26), Position = UDim2.fromOffset(20, 14),
+        TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+    local x = New("TextButton", { Text = "×", TextSize = 24, Size = UDim2.fromOffset(32, 32), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10),
+        ZIndex = Z + 2, Theme = { TextColor3 = "Dim" }, Parent = card })
+    x.Activated:Connect(Close)
+
+    -- preview card
+    local pv = New("Frame", { Size = UDim2.new(1, -40, 0, 150), Position = UDim2.fromOffset(20, 52), ZIndex = Z + 2, Theme = { BackgroundColor3 = "Card" }, Parent = card })
+    Corner(pv, 10) Stroke(pv, "Stroke", 1, 0.4)
+    local art = Lib:LoadArt()
+    local ban = New("Frame", { Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 0, 62), ZIndex = Z + 3, BackgroundColor3 = Lib.Theme.Accent:Lerp(Color3.new(0, 0, 0), 0.4), Parent = pv })
+    Corner(ban, 8)
+    if art.banner then
+        local bi = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, ZIndex = Z + 3, Parent = ban })
+        Corner(bi, 8)
+        self:_ArtImage(art.banner, function(a) if bi.Parent then bi.Image = a end end)
+    end
+    local av = New("ImageLabel", { Size = UDim2.fromOffset(64, 64), Position = UDim2.fromOffset(16, 34), BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop,
+        ZIndex = Z + 5, Theme = { BackgroundColor3 = "Field" }, Parent = pv })
+    Corner(av, 32) Stroke(av, "Card", 4, 0)
+    if art.pfp then self:_ArtImage(art.pfp, function(a) if av.Parent then av.Image = a end end)
+    else GetAvatar(LocalPlayer.UserId, function(u) if av.Parent then av.Image = u end end, "HeadShot", "Size150x150") end
+    local dot = New("Frame", { Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -1, 1, -1), ZIndex = Z + 6,
+        BackgroundColor3 = Lib:StatusColor(S.mode), Parent = av })
+    Corner(dot, 9) Stroke(dot, "Card", 3, 0)
+    -- speech bubble
+    for i, d in ipairs({ { 92, 76, 8 }, { 100, 68, 12 } }) do
+        local c = New("Frame", { Size = UDim2.fromOffset(d[3], d[3]), Position = UDim2.fromOffset(d[1] + (i - 1) * 4, d[2]), ZIndex = Z + 5, Theme = { BackgroundColor3 = "Field" }, Parent = pv })
+        Corner(c, d[3] / 2)
+    end
+    local bub = New("Frame", { Size = UDim2.new(1, -126, 0, 40), Position = UDim2.fromOffset(110, 26), ZIndex = Z + 5, Theme = { BackgroundColor3 = "Field" }, Parent = pv })
+    Corner(bub, 12) Pad(bub, 10, 4, 10, 4)
+    local bt = New("TextLabel", { RichText = true, Text = "", TextSize = 12, Size = UDim2.fromScale(1, 1), TextXAlignment = LEFT, TextWrapped = true,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 6, Parent = bub })
+    local nm = Lib:LoadChatName()
+    if nm == "" then nm = LocalPlayer.DisplayName end
+    New("TextLabel", { Text = nm, Font = Lib.FontBold, TextSize = 16, Size = UDim2.new(1, -32, 0, 20), Position = UDim2.fromOffset(16, 104), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 5, Parent = pv })
+    New("TextLabel", { Text = "@" .. LocalPlayer.Name, TextSize = 12, Size = UDim2.new(1, -32, 0, 14), Position = UDim2.fromOffset(16, 126), TextXAlignment = LEFT,
+        ZIndex = Z + 5, Theme = { TextColor3 = "Dim" }, Parent = pv })
+
+    New("TextLabel", { Text = "Status", Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, -40, 0, 16), Position = UDim2.fromOffset(20, 222), TextXAlignment = LEFT,
+        ZIndex = Z + 2, Parent = card })
+    local inF = New("Frame", { Size = UDim2.new(1, -40, 0, 42), Position = UDim2.fromOffset(20, 242), ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(inF, 8) Stroke(inF, "Accent", 1.5, 0.2)
+    local emojiBtn = New("TextButton", { Text = "", TextSize = 20, Size = UDim2.fromOffset(34, 34), Position = UDim2.fromOffset(4, 4), ZIndex = Z + 3, BackgroundTransparency = 1, Parent = inF })
+    local smile = Lib.Icon("smile", 20, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = Z + 4, Parent = emojiBtn }, ":)")
+    local tbox = New("TextBox", { Text = draft.text, PlaceholderText = "What's happening?", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 14, Size = UDim2.new(1, -52, 1, 0),
+        Position = UDim2.fromOffset(44, 0), TextXAlignment = LEFT, ZIndex = Z + 3, ClipsDescendants = true, Parent = inF })
+
+    local function Refresh()
+        local line = (draft.emoji ~= "" and (draft.emoji .. " ") or "") .. draft.text
+        if line == "" then
+            bt.Text, bt.TextColor3 = "<i>Choose your status</i>", Lib.Theme.Dim
+        else
+            bt.Text, bt.TextColor3 = "<i>" .. RichEsc(line) .. "</i>", Lib.Theme.Text
+        end
+        emojiBtn.Text = draft.emoji
+        smile.Visible = draft.emoji == ""
+    end
+    tbox:GetPropertyChangedSignal("Text"):Connect(function()
+        local t = TrimLen(tbox.Text:gsub("[\r\n]", " "), 48)
+        if t ~= tbox.Text then tbox.Text = t return end
+        draft.text = t
+        Refresh()
+    end)
+    emojiBtn.Activated:Connect(function()
+        self:EmojiPicker(function(e) draft.emoji = e Refresh() end, "Status emoji")
+    end)
+
+    -- clear after (inline dropdown, so it stays inside this window)
+    local clearBtn = New("TextButton", { Text = "", Size = UDim2.new(1, -40, 0, 34), Position = UDim2.fromOffset(20, 302), ZIndex = Z + 2, BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = "Field" }, Parent = card })
+    Corner(clearBtn, 8)
+    local clearLbl = New("TextLabel", { Text = "", TextSize = 13, Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(12, 0), TextXAlignment = LEFT, ZIndex = Z + 3, Parent = clearBtn })
+    Lib.Icon("chevron-down", 14, "Dim", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), ZIndex = Z + 3, Parent = clearBtn }, "v")
+    local dd = New("Frame", { Size = UDim2.new(1, -40, 0, #opts * 30 + 8), Position = UDim2.fromOffset(20, 340), ZIndex = Z + 10, Visible = false, Theme = { BackgroundColor3 = "Surface" }, Parent = card })
+    Corner(dd, 8) Stroke(dd, "Stroke", 1, 0) Pad(dd, 4, 4, 4, 4) List(dd, 0)
+    local function Paint()
+        clearLbl.Text = "Clear after:  " .. OptLabel()
+        for _, c in ipairs(dd:GetChildren()) do
+            if c:IsA("TextButton") then c.TextColor3 = (c:GetAttribute("secs") == draft.secs) and Lib.Theme.Accent or Lib.Theme.Text end
+        end
+    end
+    for i, o in ipairs(opts) do
+        local b = New("TextButton", { Text = o[1], TextSize = 13, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = i, TextXAlignment = LEFT, ZIndex = Z + 11,
+            BackgroundTransparency = 1, Theme = { BackgroundColor3 = "FieldHover" }, Parent = dd })
+        b:SetAttribute("secs", o[2])
+        Corner(b, 5) Pad(b, 10, 0, 8, 0)
+        b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.4 }, 0.06) end)
+        b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+        b.Activated:Connect(function() draft.secs = o[2] dd.Visible = false Paint() end)
+    end
+    clearBtn.Activated:Connect(function() dd.Visible = not dd.Visible end)
+
+    local function Save()
+        draft.text = TrimLen(Trim(tbox.Text), 48)
+        Lib:SetCustomStatus(draft.emoji, draft.text, draft.secs)
+        Close()
+        Lib:Notify({ Title = "Status", Text = (draft.text ~= "" or draft.emoji ~= "") and "Status updated." or "Status cleared.", Type = "success", Duration = 2 })
+    end
+    local row = New("Frame", { Size = UDim2.new(1, -40, 0, 36), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 20, 1, -18), BackgroundTransparency = 1, ZIndex = Z + 2, Parent = card })
+    List(row, 8, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+    local function FBtn(text, order, primary, fn)
+        local b = New("TextButton", { Text = text, TextSize = 13, AutomaticSize = X, Size = UDim2.fromOffset(0, 36), LayoutOrder = order, BackgroundTransparency = 0, ZIndex = Z + 3,
+            Theme = { BackgroundColor3 = primary and "Accent" or "Field", TextColor3 = primary and "OnAccent" or "Text" }, Parent = row })
+        Corner(b, 6) Pad(b, 18, 0, 18, 0)
+        b.Activated:Connect(fn)
+    end
+    if Lib:StatusLine() ~= "" then
+        FBtn("Clear Status", 1, false, function() Lib:SetCustomStatus("", "", 0) Close() end)
+    end
+    FBtn("Cancel", 2, false, Close)
+    FBtn("Save", 3, true, Save)
+    tbox.FocusLost:Connect(function(enter) if enter then Save() end end)
+    Paint()
+    Refresh()
+end
+
+-- request wrapper: sends st / stx, and hides your server while invisible
+function Chat:_InitStatus()
+    if self._stWrap or type(self.Request) ~= "function" then return end
+    self._stWrap = true
+    local raw = self.Request
+    self.Request = function(req, ...)
+        pcall(function()
+            if type(req) ~= "table" or type(req.Url) ~= "string" then return end
+            local S = Lib:LoadStatus()
+            local base, q = req.Url:match("^([^%?]*)%?(.*)$")
+            if not base then return end
+            local out = {}
+            for pair in q:gmatch("[^&]+") do
+                local k = pair:match("^([^=]*)")
+                local hide = S.mode == "invisible" and (k == "place" or k == "job")
+                if not hide and k ~= "st" and k ~= "stx" then out[#out + 1] = pair end
+            end
+            out[#out + 1] = "st=" .. S.mode
+            local line = Lib:StatusLine()
+            if line ~= "" then out[#out + 1] = "stx=" .. UrlEncode(line) end
+            req.Url = base .. "?" .. table.concat(out, "&")
+        end)
+        return raw(req, ...)
+    end
+
+    -- the name panel opens the status menu instead of the profile
+    local u = self._up
+    local up = u and u.name and u.name.Parent
+    if up then
+        for _, c in ipairs(up:GetChildren()) do
+            if c:IsA("TextButton") and c.ZIndex == 2 and c.Size == UDim2.new(1, -30, 1, 0) then c:Destroy() end
+        end
+        local hit = New("TextButton", { Text = "", Size = UDim2.new(1, -30, 1, 0), ZIndex = 2, Parent = up })
+        hit.Activated:Connect(function() self:StatusMenu(up) end)
+        hit.MouseButton2Click:Connect(function() self:StatusMenu(up) end)
+        Lib:AddTooltip(hit, "Set your status")
+    end
+
+    task.spawn(function()
+        local lastSig = ""
+        while not Lib.Unloaded and self.Frame and self.Frame.Parent do
+            task.wait(10)
+            pcall(function()
+                local S = Lib:LoadStatus()
+                if S.untilT and os.time() >= S.untilT then
+                    S.text, S.emoji, S.untilT = "", "", nil
+                    Lib:SaveStatus()
+                    Lib:_StatusChanged()
+                    Lib:Notify({ Title = "Status", Text = "Your custom status was cleared.", Type = "info", Duration = 3 })
+                end
+                local N = Lib:LoadNotifPrefs()
+                for room in pairs(N.untilT) do Lib:GetNotif(room) end
+                local parts = {}
+                for _, us in ipairs(self.Users or {}) do parts[#parts + 1] = tostring(us.uid) .. tostring(us.st or "") end
+                local sig = table.concat(parts, ",")
+                if sig ~= lastSig then lastSig = sig self:_QueueSidebar() end
+            end)
+        end
+    end)
+end
+
+-- ==================== 4) sidebar: right click + status dots ====================
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function()
+        local used = {}
+        for _, row in ipairs(sb.list:GetChildren()) do
+            if row.Name == "Ch" and row:IsA("TextButton") then
+                local ch
+                for _, x in ipairs(row:GetChildren()) do
+                    if x:IsA("TextLabel") and not ch then
+                        for _, c2 in ipairs(self.Channels) do
+                            if not used[c2] and tostring(c2.name) == x.Text then ch = c2 break end
+                        end
+                    end
+                end
+                if ch then
+                    used[ch] = true
+                    row.MouseButton2Click:Connect(function()
+                        self.LastPtr = UIS:GetMouseLocation() + Lib.PtrShift
+                        self:ConvoMenu(ch, row)
+                    end)
+                    row.InputBegan:Connect(function(input)
+                        if input.UserInputType ~= Enum.UserInputType.Touch then return end
+                        local alive, c = true, nil
+                        c = UIS.InputEnded:Connect(function(i) if i == input then alive = false c:Disconnect() end end)
+                        task.delay(0.5, function()
+                            if alive then alive = false c:Disconnect() self:ConvoMenu(ch, row) end
+                        end)
+                    end)
+                    if ch.kind == "dm" and ch.uid then
+                        local av = row:FindFirstChild("DmAvatar")
+                        local dot = av and av:FindFirstChildOfClass("Frame")
+                        local m = self:_StatusOf(ch.uid)
+                        if dot and m then dot.BackgroundColor3 = Lib:StatusColor(m) end
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then warn("[Aether] sidebar menu: " .. tostring(err)) end
+end
+
+-- ==================== 5) your picture: robust + saved to disk ====================
+do
+    local loaded = false
+    local function Path() return Lib.ConfigFolder .. "/profileart.json" end
+    local function Clean(e)
+        if type(e) ~= "table" then return nil end
+        local out
+        if type(e.asset) == "string" and e.asset:find("^rbxassetid://%d+$") then out = { asset = e.asset } end
+        if e.id ~= nil and #tostring(e.id) < 80 then out = out or {} out.id = tostring(e.id) out.mime = type(e.mime) == "string" and e.mime or "image/png" end
+        if type(e.file) == "string" and #e.file < 200 then out = out or {} out.file = e.file end
+        return out
+    end
+    function Lib:LoadArt()
+        if loaded then return self.Art end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                self.Art.pfp = Clean(d.pfp)
+                self.Art.banner = Clean(d.banner)
+            end)
+        end
+        return self.Art
+    end
+end
+
+function Chat:_ArtImage(entry, cb)
+    if not entry then return end
+    if entry.file and FsOk() then
+        local ok, ex = pcall(isfile, entry.file)
+        if ok and ex then
+            local a = CustomAsset(entry.file)
+            if a then cb(a) return end
+        end
+    end
+    if entry.asset then cb(entry.asset) return end
+    if entry.id then
+        self:_IconAsset(entry, "global", function(a) cb(a) end)
+        if self.Room ~= "global" then self:_IconAsset(entry, self.Room, function(a) cb(a) end) end
+    end
+end
+
+P.SetArt = Lib.SetArt
+function Lib:SetArt(kind, entry)
+    local c = self.ChatObj
+    local f = c and c._artFile
+    if entry and entry.id and f and f.kind == kind then
+        local t0 = os.clock()
+        while not f.done and os.clock() - t0 < 8 do task.wait(0.1) end
+        if f.path then entry.file = f.path end
+        c._artFile = nil
+    end
+    return P.SetArt(self, kind, entry)
+end
+
+P.SetArtUp = Chat._SetArt
+function Chat:_SetArt(pk, payload)
+    local f = { kind = pk.kind, done = false }
+    self._artFile = f
+    self:_FetchBg(payload, function(path) f.path, f.done = path, true end)
+    return P.SetArtUp(self, pk, payload)
+end
+
+local function LockImage(img, store)
+    if img:GetAttribute("p67") then return end
+    img:SetAttribute("p67", true)
+    img:GetPropertyChangedSignal("Image"):Connect(function()
+        local w = store.want
+        if w and img.Image ~= w then img.Image = w end
+    end)
+end
+
+P.UpdateUserPanel = Chat._UpdateUserPanel
+function Chat:_UpdateUserPanel()
+    P.UpdateUserPanel(self)
+    pcall(function()
+        local u = self._up
+        if not (u and u.name.Parent) then return end
+        local av = u.name.Parent:FindFirstChildWhichIsA("ImageLabel")
+        if not av then return end
+        u.lock = u.lock or { want = nil }
+        LockImage(av, u.lock)
+        local e = Lib:LoadArt().pfp
+        local key = e and (e.file or e.asset or e.id) or "default"
+        if u.key67 ~= key then
+            u.key67 = key
+            u.lock.want = nil
+            av.ScaleType = Enum.ScaleType.Crop
+            if e then
+                self:_ArtImage(e, function(a) if av.Parent and u.key67 == key then u.lock.want = a av.Image = a end end)
+            else
+                GetAvatar(LocalPlayer.UserId, function(url) if av.Parent and u.key67 == key then av.Image = url end end)
+            end
+        end
+        local S = Lib:LoadStatus()
+        if self.State == "Connected" then
+            u.dot.BackgroundColor3 = Lib:StatusColor(S.mode)
+            local line = Lib:StatusLine()
+            u.sub.Text = line ~= "" and line or (ModeInfo[S.mode][1] .. " · " .. tostring(self.Online or 0) .. " in chat")
+        end
+    end)
+end
+
+-- ==================== 6) profile card: status dot + status bubble ====================
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    pcall(function()
+        local uid = tonumber(u.uid)
+        if not uid then return end
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do if not before[c] and c:IsA("TextButton") then dim = c end end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        if not card then return end
+        local m, x = self:_StatusOf(uid)
+        if m then
+            for _, d in ipairs(card:GetDescendants()) do
+                if d:IsA("Frame") and d.Size == UDim2.fromOffset(16, 16) and d.Parent:IsA("ImageLabel") then d.BackgroundColor3 = Lib:StatusColor(m) end
+            end
+        end
+        if x and x ~= "" then
+            for _, c in ipairs(card:GetChildren()) do
+                if c:IsA("GuiObject") and c.LayoutOrder >= 2 then c.LayoutOrder = c.LayoutOrder + 1 end
+            end
+            local bub = New("Frame", { Name = "StatusBubble", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, LayoutOrder = 2, BackgroundTransparency = 0.2, ZIndex = 102,
+                Theme = { BackgroundColor3 = "Field" }, Parent = card })
+            Corner(bub, 8) Pad(bub, 10, 6, 10, 6)
+            local l = New("TextLabel", { RichText = true, Text = "<i>" .. RichEsc(x) .. "</i>", TextSize = 13, Size = UDim2.new(1, 0, 0, 16), TextXAlignment = LEFT,
+                TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 103, Parent = bub })
+            Wrap(l, nil, nil, 16)
+        end
+    end)
+end
+
+-- ==================== 7) input: multi-line, wraps, never leaves the box ====================
+function Chat:_InitInputBox()
+    if self._inBox then return end
+    self._inBox = true
+    local input = self.Input
+    local frame = input.Parent
+    local ih = H(32)
+    local maxH = ih + 78
+    input.MultiLine, input.TextWrapped, input.ClipsDescendants = true, true, true
+    input.TextYAlignment = Enum.TextYAlignment.Center
+    for _, c in ipairs(frame:GetChildren()) do
+        if c:IsA("TextButton") then
+            c.AnchorPoint = Vector2.new(c.AnchorPoint.X, 1)
+            c.Position = UDim2.new(c.Position.X.Scale, c.Position.X.Offset, 1, -4)
+        end
+    end
+    local function Fit()
+        if not frame.Parent then return end
+        local want = Clamp(math.ceil(input.TextBounds.Y) + 16, ih, maxH)
+        local multi = want > ih
+        input.TextYAlignment = multi and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center
+        input.Position = UDim2.fromOffset(10, multi and 8 or 0)
+        input.Size = UDim2.new(1, -(ih * 3 + 14), 1, multi and -12 or 0)
+        if frame.Size.Y.Offset ~= want then
+            frame.Size = UDim2.new(frame.Size.X.Scale, frame.Size.X.Offset, 0, want)
+            self.ListBottom = want + 16
+            self.ReplyBar.Position = UDim2.new(0, 8, 1, -(want + 12))
+            self:_Relayout()
+        end
+    end
+    input:GetPropertyChangedSignal("TextBounds"):Connect(Fit)
+    input:GetPropertyChangedSignal("AbsoluteSize"):Connect(Fit)
+    input:GetPropertyChangedSignal("Text"):Connect(function()
+        if self._enterBusy then return end
+        local t = input.Text
+        local shift = UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift)
+        if not Lib.Touch and t:sub(-1) == "\n" and not shift then
+            self._enterBusy = true
+            local msg = (t:gsub("[\r\n]+$", ""))
+            input.Text = ""
+            self._enterBusy = false
+            self:Send(msg)
+        end
+        Fit()
+    end)
+    Fit()
+end
+
+-- ==================== 8) reactions: hover to see who ====================
+local NameCache = {}
+function Chat:_NameOf(uid)
+    uid = tonumber(uid)
+    if not uid then return "someone" end
+    if uid == LocalPlayer.UserId then return "You" end
+    local c = NameCache[uid]
+    if c then return c end
+    local function Take(n) if n and n ~= "" then NameCache[uid] = tostring(n) return NameCache[uid] end end
+    for _, u in ipairs(self.Users or {}) do
+        if tonumber(u.uid) == uid then local r = Take((u.display and u.display ~= "") and u.display or u.name) if r then return r end end
+    end
+    local f = self.Friends and self.Friends.byId[tostring(uid)]
+    if f then local r = Take((f.display and f.display ~= "") and f.display or f.name) if r then return r end end
+    for _, it in ipairs(self.Items) do
+        local m = self.Meta[it]
+        if m and m.msg and tonumber(m.msg.uid) == uid then
+            local r = Take((m.msg.display and m.msg.display ~= "") and m.msg.display or m.msg.name)
+            if r then return r end
+        end
+    end
+    local plr = Players:GetPlayerByUserId(uid)
+    if plr then local r = Take(plr.DisplayName) if r then return r end end
+    local key = "q" .. uid
+    if not NameCache[key] then
+        NameCache[key] = true
+        task.spawn(function()
+            local ok, n = pcall(function() return Players:GetNameFromUserIdAsync(uid) end)
+            if ok and n then NameCache[uid] = n end
+        end)
+    end
+    return "someone"
+end
+
+local function RxText(self, r)
+    local names, me = {}, false
+    for _, u in ipairs(r.u or {}) do
+        if tonumber(u) == LocalPlayer.UserId then me = true else names[#names + 1] = self:_NameOf(u) end
+    end
+    if me then table.insert(names, 1, "You") end
+    local n = #names
+    if n == 0 then return tostring(r.e) end
+    local text
+    if n == 1 then text = names[1]
+    elseif n <= 8 then text = table.concat(names, ", ", 1, n - 1) .. " and " .. names[n]
+    else text = table.concat(names, ", ", 1, 8) .. " and " .. (n - 8) .. " others" end
+    return text .. " reacted with " .. tostring(r.e)
+end
+
+P.RenderReactions = Chat._RenderReactions
+function Chat:_RenderReactions(item, list)
+    P.RenderReactions(self, item, list)
+    pcall(function()
+        local col = item and item:FindFirstChild("Col")
+        local row = col and col:FindFirstChild("Reacts")
+        if not (row and list) then return end
+        for _, chip in ipairs(row:GetChildren()) do
+            if chip:IsA("TextButton") then
+                local r = list[chip.LayoutOrder]
+                if r then
+                    local cache, at = nil, 0
+                    Lib:AddTooltip(chip, function()
+                        if not cache or os.clock() - at > 1 then cache, at = RxText(self, r), os.clock() end
+                        return cache
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+-- ==================== 9) link previews (relay, then public APIs) ====================
+Lib.PreviewDirect = false -- true = last resort: your own client fetches the page (the site sees your IP)
+
+local function Unesc(s)
+    s = tostring(s or "")
+    s = s:gsub("&#(%d+);", function(n)
+        local c = tonumber(n)
+        if c and c > 0 and c < 0x110000 then local ok, ch = pcall(utf8.char, c) if ok then return ch end end
+        return ""
+    end)
+    s = s:gsub("&#[xX](%x+);", function(h)
+        local c = tonumber(h, 16)
+        if c and c > 0 and c < 0x110000 then local ok, ch = pcall(utf8.char, c) if ok then return ch end end
+        return ""
+    end)
+    s = s:gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&nbsp;", " "):gsub("&amp;", "&")
+    s = s:gsub("%s+", " ")
+    return Trim(s)
+end
+
+local function MetaTag(html, key)
+    for tag in html:gmatch("<[Mm][Ee][Tt][Aa]%s[^>]*>") do
+        local p = tag:match("[Pp][Rr][Oo][Pp][Ee][Rr][Tt][Yy]%s*=%s*[\"']([^\"']+)[\"']") or tag:match("[Nn][Aa][Mm][Ee]%s*=%s*[\"']([^\"']+)[\"']")
+        if p and p:lower() == key then
+            local c = tag:match("[Cc][Oo][Nn][Tt][Ee][Nn][Tt]%s*=%s*\"([^\"]*)\"") or tag:match("[Cc][Oo][Nn][Tt][Ee][Nn][Tt]%s*=%s*'([^']*)'")
+            if c and c ~= "" then return Unesc(c) end
+        end
+    end
+end
+
+local function ParseHtml(html)
+    html = html:sub(1, 90000)
+    local d = {
+        title = MetaTag(html, "og:title") or MetaTag(html, "twitter:title"),
+        desc = MetaTag(html, "og:description") or MetaTag(html, "twitter:description") or MetaTag(html, "description"),
+        site = MetaTag(html, "og:site_name"),
+        image = MetaTag(html, "og:image") or MetaTag(html, "twitter:image"),
+    }
+    if not d.title then
+        local t = html:match("<[Tt][Ii][Tt][Ll][Ee][^>]*>(.-)</[Tt][Ii][Tt][Ll][Ee]>")
+        if t then d.title = Unesc(t) end
+    end
+    if d.title or d.desc then return d end
+end
+
+local function JSON(body)
+    local ok, d = pcall(function() return HttpService:JSONDecode(body or "") end)
+    return (ok and type(d) == "table") and d or nil
+end
+
+local Providers = {
+    function(url) -- Microlink
+        local d = JSON(Fetch("https://api.microlink.io/?url=" .. UrlEncode(url)))
+        local x = d and d.status == "success" and d.data
+        if type(x) == "table" and (x.title or x.description) then
+            return { title = x.title, desc = x.description, site = x.publisher, image = type(x.image) == "table" and x.image.url or nil }
+        end
+    end,
+    function(url) -- Noembed (YouTube, Vimeo, Twitter...)
+        local d = JSON(Fetch("https://noembed.com/embed?url=" .. UrlEncode(url)))
+        if d and not d.error and d.title then
+            return { title = d.title, desc = d.author_name and ("by " .. d.author_name) or nil, site = d.provider_name, image = d.thumbnail_url }
+        end
+    end,
+    function(url) -- allorigins + OpenGraph
+        local html = Fetch("https://api.allorigins.win/raw?url=" .. UrlEncode(url))
+        if type(html) == "string" and #html > 50 then return ParseHtml(html) end
+    end,
+    function(url) -- direct, off by default
+        if not Lib.PreviewDirect then return nil end
+        local html = Fetch(url)
+        if type(html) == "string" and #html > 50 then return ParseHtml(html) end
+    end,
+}
+
+local function AbsUrl(img, url)
+    if type(img) ~= "string" or img == "" then return nil end
+    if img:sub(1, 2) == "//" then return "https:" .. img end
+    if img:sub(1, 4) == "http" then return img end
+    local origin = url:match("^(https?://[^/%?#]+)")
+    if img:sub(1, 1) == "/" and origin then return origin .. img end
+    return nil
+end
+
+local function PreviewImage(imgUrl, cb)
+    if not (imgUrl and FsOk() and (getcustomasset or getsynasset)) then return end
+    task.spawn(function()
+        local base = Lib.ConfigFolder .. "/cache/pv_" .. H32(imgUrl)
+        for _, ext in ipairs({ ".jpg", ".png", ".bmp" }) do
+            local ok, ex = pcall(isfile, base .. ext)
+            if ok and ex then
+                local a = CustomAsset(base .. ext)
+                if a then cb(a) return end
+            end
+        end
+        local body = Fetch(imgUrl)
+        if type(body) ~= "string" or #body > 2000000 then return end
+        local ext = ThumbExt(body)
+        if not ext then return end
+        CachePath("x", "image/png")
+        if pcall(writefile, base .. ext, body) then
+            local a = CustomAsset(base .. ext)
+            if a then cb(a) end
+        end
+    end)
+end
+
+local function ResolvePreview(self, url)
+    local c = Lib.PreviewCache[url]
+    if type(c) == "table" and (c.data or os.clock() - c.t < 120) then return c.data or nil end
+    if c == "busy" then
+        local t0 = os.clock()
+        while Lib.PreviewCache[url] == "busy" and os.clock() - t0 < 25 do task.wait(0.2) end
+        c = Lib.PreviewCache[url]
+        return (type(c) == "table" and c.data) or nil
+    end
+    Lib.PreviewCache[url] = "busy"
+    local data
+    local ok, r = pcall(function() return Decode(self:_Do("/preview", { link = url })) end)
+    if ok and r and r.ok and ((r.title and r.title ~= "") or (r.desc and r.desc ~= "")) then
+        data = { title = r.title, desc = r.desc, site = r.site or r.host, image = r.image }
+    end
+    if not data then
+        for _, fn in ipairs(Providers) do
+            local ok2, res = pcall(fn, url)
+            if ok2 and type(res) == "table" and (res.title or res.desc) then data = res break end
+        end
+    end
+    if data then
+        data.host = (url:match("^https?://([^/%?#]+)") or ""):gsub("^www%.", "")
+        data.site = (data.site and data.site ~= "") and data.site or data.host
+    end
+    Lib.PreviewCache[url] = { data = data or false, t = os.clock() }
+    return data
+end
+
+function Chat:LoadPreview(parent, url, order)
+    if Lib.LinkPreviews == false then return end
+    task.spawn(function()
+        local d = ResolvePreview(self, url)
+        if not (d and parent and parent.Parent) then return end
+        local title = Short(tostring(d.title or ""), 120)
+        local desc = Short(tostring(d.desc or ""), 200)
+        if title == "" and desc == "" then return end
+        local imgUrl = AbsUrl(d.image, url)
+        local h = 8 + 13 + 17 + (desc ~= "" and 30 or 0) + 8
+        if imgUrl then h = math.max(h, 66) end
+        local card = New("TextButton", { Name = "Preview", Text = "", Size = UDim2.new(1, 0, 0, h), LayoutOrder = order, BackgroundTransparency = 0.35,
+            Theme = { BackgroundColor3 = "Bg" }, Parent = parent })
+        Corner(card, 6)
+        New("Frame", { Size = UDim2.new(0, 2, 1, -10), Position = UDim2.fromOffset(5, 5), Theme = { BackgroundColor3 = "Accent" }, Parent = card })
+        local img = New("ImageLabel", { Size = UDim2.fromOffset(52, 52), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), ScaleType = Enum.ScaleType.Crop,
+            Visible = false, BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+        Corner(img, 6)
+        local rw = -22
+        New("TextLabel", { Text = tostring(d.site or ""), TextSize = 10, Size = UDim2.new(1, rw, 0, 13), Position = UDim2.fromOffset(14, 6), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = card })
+        local tl = New("TextLabel", { Text = title ~= "" and title or url, Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, rw, 0, 16), Position = UDim2.fromOffset(14, 19),
+            TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Accent" }, Parent = card })
+        local dl
+        if desc ~= "" then
+            dl = New("TextLabel", { Text = desc, TextSize = 11, Size = UDim2.new(1, rw, 0, 28), Position = UDim2.fromOffset(14, 36), TextXAlignment = LEFT,
+                TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "SubText" }, Parent = card })
+        end
+        card.Activated:Connect(function() Copy(url, "Link copied") end)
+        Lib:AddTooltip(card, "Click to copy the link")
+        if imgUrl then
+            PreviewImage(imgUrl, function(a)
+                if not img.Parent then return end
+                img.Image, img.Visible = a, true
+                tl.Size = UDim2.new(1, rw - 60, 0, 16)
+                if dl then dl.Size = UDim2.new(1, rw - 60, 0, 28) end
+            end)
+        end
+    end)
+end
+
+-- ==================== 10) ESP preview: keeps model through death / respawn, stays centered ====================
+P.Rebuild = ESP.Rebuild
+function ESP:Rebuild()
+    local old = self.Model
+    local res = self:_Ensure(true)
+    local char = res and res.model
+    local ready = char and char.Parent and (not char:FindFirstChildOfClass("Humanoid") or char:FindFirstChild("HumanoidRootPart"))
+    if not ready and old and old.Parent then
+        self._gap = true
+        return
+    end
+    self._gap, self._frz, self._rel, self._view = nil, nil, nil, nil
+    return P.Rebuild(self)
+end
+
+local function PreStep(self)
+    if self._static or not self.Model then return end
+    local res = self._res
+    local root = res and res.root
+    local src = self.Src
+    local hum = src and src.Parent and src:FindFirstChildOfClass("Humanoid")
+    if not (hum and root and root.Parent) then return end
+    if hum.Health > 0 then
+        if self._frz then
+            for i, pr in ipairs(self.Pairs) do if self._frz[i] then pr[1] = self._frz[i] end end
+            self._frz = nil
+        end
+        local now = os.clock()
+        if now - (self._relAt or 0) > 0.1 then
+            self._relAt = now
+            local inv = root.CFrame:Inverse()
+            local rel = self._rel or {}
+            for i, pr in ipairs(self.Pairs) do
+                local r = pr[1]
+                if typeof(r) == "Instance" and r.Parent then rel[i] = inv * r.CFrame end
+            end
+            self._rel = rel
+        end
+    elseif not self._frz and self._rel then
+        -- dead: keep the last standing pose instead of following the ragdoll
+        local rel, real = self._rel, {}
+        for i, pr in ipairs(self.Pairs) do
+            real[i] = pr[1]
+            local rl = rel[i]
+            if rl then
+                pr[1] = setmetatable({ Parent = true }, { __index = function(_, k)
+                    if k == "CFrame" then return root.CFrame * rl end
+                    if k == "Position" then return (root.CFrame * rl).Position end
+                    return nil
+                end })
+            end
+        end
+        self._frz = real
+    end
+end
+
+local function Recenter(self)
+    if self._static or self._frz or not self.Model then return end
+    local now = os.clock()
+    if now - (self._rcAt or 0) < 0.5 then return end
+    self._rcAt = now
+    local res = self._res
+    local root = res and res.root
+    if not (root and root.Parent) then return end
+    local inv = root.CFrame:Inverse()
+    local top, bot = -math.huge, math.huge
+    for _, pr in ipairs(self.Pairs) do
+        local r, c = pr[1], pr[2]
+        if typeof(r) == "Instance" and r.Parent and c.Parent == self.Model and r.Name ~= "HumanoidRootPart" then
+            local y = (inv * r.CFrame).Position.Y
+            local hh = r.Size.Y / 2
+            if r.Name == "Head" then top = math.max(top, y + hh)
+            elseif table.find(FeetNames, r.Name) then bot = math.min(bot, y - hh) end
+        end
+    end
+    if top == -math.huge or bot == math.huge or top - bot < 2 then return end
+    local cy = (top + bot) / 2
+    local dist = (((top - bot) / 0.64) / 2) / math.tan(math.rad(self.Camera.FieldOfView) / 2) + 1.5
+    local c0 = self.Center
+    if not c0 or not self.Distance or math.abs(c0.Y - cy) > 0.3 or math.abs(c0.X) > 0.5 or math.abs(c0.Z) > 0.5 or math.abs(self.Distance - dist) > 1.5 then
+        self.Center = Vector3.new(0, cy, 0)
+        self.Distance = dist
+    end
+end
+
+P.Step = ESP._Step
+function ESP:_Step(dt)
+    local on = self.Alive and self.Frame.Visible
+    if on then pcall(PreStep, self) end
+    P.Step(self, dt)
+    if on then
+        if self._gap then self.ViewLabel.Text = "Respawning..." end
+        pcall(Recenter, self)
+    end
+end
+
+-- ==================== 11) settings pages: auto correct, notification default, status ====================
+local function MakeLine(card, label, desc, order)
+    local r = New("Frame", { Size = UDim2.new(1, 0, 0, desc and 56 or 46), BackgroundTransparency = 1, LayoutOrder = order, Parent = card })
+    New("TextLabel", { Text = label, TextSize = 14, Size = UDim2.new(1, -210, 0, 18), Position = UDim2.fromOffset(0, desc and 10 or 14), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+    if desc then
+        New("TextLabel", { Text = desc, TextSize = 11, Size = UDim2.new(1, -210, 0, 14), Position = UDim2.fromOffset(0, 30), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "Dim" }, Parent = r })
+    end
+    New("Frame", { Size = UDim2.new(1, 0, 0, 1), AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), BackgroundTransparency = 0.6, Theme = { BackgroundColor3 = "Stroke" }, Parent = r })
+    local R = New("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(0, 32), AutomaticSize = X, BackgroundTransparency = 1, Parent = r })
+    List(R, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+    return r, R
+end
+
+local function MiniBtn(parent, text, fn, primary)
+    local b = New("TextButton", { Text = text, TextSize = 12, AutomaticSize = X, Size = UDim2.fromOffset(0, 28), BackgroundTransparency = 0,
+        Theme = { BackgroundColor3 = primary and "Accent" or "FieldHover", TextColor3 = primary and "OnAccent" or "Text" }, Parent = parent })
+    Corner(b, 5) Pad(b, 12, 0, 12, 0)
+    b.Activated:Connect(function() fn(b) end)
+    return b
+end
+
+local function MiniToggle(parent, get, set)
+    local on = get() and true or false
+    local b = New("TextButton", { Text = "", Size = UDim2.fromOffset(42, 24), BackgroundTransparency = 0, BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Stroke, Parent = parent })
+    Corner(b, 12)
+    local k = New("Frame", { Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, on and 21 or 3, 0.5, 0), BackgroundColor3 = WHITE, Parent = b })
+    Corner(k, 9)
+    b.Activated:Connect(function()
+        on = not on
+        Tween(b, { BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Stroke }, 0.12)
+        Tween(k, { Position = UDim2.new(0, on and 21 or 3, 0.5, 0) }, 0.14)
+        set(on)
+    end)
+end
+
+local function MiniSeg(parent, values, getv, setv)
+    local f = New("Frame", { Size = UDim2.fromOffset(#values * 84, 28), BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field" }, Parent = parent })
+    Corner(f, 6)
+    local btns = {}
+    local function Paint()
+        for v, b in pairs(btns) do
+            local on = v == getv()
+            b.BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Field
+            b.TextColor3 = on and Lib.KnobOn() or Lib.Theme.SubText
+        end
+    end
+    for i, v in ipairs(values) do
+        local b = New("TextButton", { Text = v, TextSize = 12, Size = UDim2.new(1 / #values, -4, 1, -4), Position = UDim2.new((i - 1) / #values, 2, 0, 2), BackgroundTransparency = 0, Parent = f })
+        Corner(b, 5)
+        btns[v] = b
+        b.Activated:Connect(function() setv(v) Paint() end)
+    end
+    Paint()
+end
+
+local function InsertAfter(card, line)
+    local base = line.LayoutOrder
+    for _, c in ipairs(card:GetChildren()) do
+        if c:IsA("GuiObject") and c ~= line and c.LayoutOrder > base then c.LayoutOrder = c.LayoutOrder + 1 end
+    end
+    return base + 1
+end
+
+local NModes = { All = "all", Mentions = "mentions", Nothing = "none" }
+local NNames = { all = "All", mentions = "Mentions", none = "Nothing" }
+
+local function InjectSettings(chat, d)
+    if not (d.Parent and d:IsA("TextLabel")) or d:GetAttribute("p67") then return end
+    local txt = d.Text
+    if txt ~= "Double-tap reaction" and txt ~= "Popup notifications" and txt ~= "Chat display name" then return end
+    d:SetAttribute("p67", true)
+    task.defer(function()
+        if not d.Parent then return end
+        local line = d.Parent
+        local card = line.Parent
+        if not (card and line:IsA("Frame")) then return end
+        local function Sync(idx, v) local t = Lib.Toggles[idx] if t then t:SetValue(v, true) end end
+
+        if txt == "Double-tap reaction" then
+            local prefs = Lib:LoadChatPrefs()
+            local _, R = MakeLine(card, "Auto correct", "Fixes typos as you type. Backspace right after a fix to undo.", InsertAfter(card, line))
+            MiniToggle(R, function() return prefs.AutoCorrect end, function(v) prefs.AutoCorrect = v Lib:SaveChatPrefs() Sync("AutoCorrect", v) end)
+
+        elseif txt == "Popup notifications" then
+            local o = InsertAfter(card, line)
+            local _, R1 = MakeLine(card, "Notify me for", "Default for every chat. Right-click a chat in the sidebar to override it.", o)
+            MiniSeg(R1, { "All", "Mentions", "Nothing" }, function() return NNames[Lib:LoadNotifPrefs().default] end, function(v) Lib:SetNotifDefault(NModes[v]) end)
+            local n = 0
+            for _ in pairs(Lib:LoadNotifPrefs().rooms) do n = n + 1 end
+            local _, R2 = MakeLine(card, "Per-chat overrides", n .. (n == 1 and " chat has its own setting" or " chats have their own setting"), o + 1)
+            MiniBtn(R2, "Reset all", function() Lib:ResetNotifOverrides() Lib:Notify({ Title = "Notifications", Text = "All chats use the default again.", Type = "success", Duration = 2.5 }) end)
+            local _, R3 = MakeLine(card, "Do Not Disturb", "Hides mention, DM and friend request popups", o + 2)
+            MiniToggle(R3, function() return Lib:LoadStatus().mode == "dnd" end, function(v) Lib:SetStatusMode(v and "dnd" or "online") end)
+
+        elseif txt == "Chat display name" then
+            local S = Lib:LoadStatus()
+            local sline = Lib:StatusLine()
+            local _, R = MakeLine(card, "Status", sline ~= "" and sline or "No custom status", InsertAfter(card, line))
+            MiniBtn(R, ModeInfo[S.mode][1] .. " ▾", function(b)
+                local items = {}
+                for _, m in ipairs({ "online", "idle", "dnd", "invisible" }) do
+                    items[#items + 1] = { Text = (Lib:LoadStatus().mode == m and "• " or "   ") .. ModeInfo[m][1], Callback = function() Lib:SetStatusMode(m) end }
+                end
+                chat:Menu(items, b)
+            end)
+            MiniBtn(R, "Custom", function() chat:StatusEditor() end, true)
+        end
+    end)
+end
+
+P.OpenSettings = Chat.OpenSettings
+function Chat:OpenSettings(page)
+    P.OpenSettings(self, page)
+    local root = self._set
+    if root and root.Parent and not root:GetAttribute("p67") then
+        root:SetAttribute("p67", true)
+        for _, d in ipairs(root:GetDescendants()) do pcall(InjectSettings, self, d) end
+        root.DescendantAdded:Connect(function(d)
+            if d:GetAttribute("p67") then return end
+            task.defer(function() if d.Parent then pcall(InjectSettings, self, d) end end)
+        end)
+    end
+end
+
+-- ==================== 12) main menu polish ====================
+P.SelectTab = Window.SelectTab
+function Window:SelectTab(tab)
+    P.SelectTab(self, tab)
+    pcall(function()
+        for _, t in ipairs(self.Tabs) do
+            if t.Rail and t.Rail.Icon then Tint(t.Rail.Icon, t == self.ActiveTab and Lib.Theme.Accent or Lib.Theme.SubText, 0.12) end
+        end
+    end)
+end
+
+P.CreateWindow = Lib.CreateWindow
+function Lib:CreateWindow(cfg)
+    local win = P.CreateWindow(self, cfg)
+    pcall(function()
+        local line = New("Frame", { Name = "AccentLine", Size = UDim2.new(1, -24, 0, 2), Position = UDim2.fromOffset(12, 0), ZIndex = 30, Theme = { BackgroundColor3 = "Accent" }, Parent = win.Main })
+        New("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.15, 0.25),
+            NumberSequenceKeypoint.new(0.85, 0.25), NumberSequenceKeypoint.new(1, 1) }), Parent = line })
+    end)
+    pcall(function()
+        local av = win.Avatar
+        if av then
+            local dot = New("Frame", { Name = "StatusDot", Size = UDim2.fromOffset(9, 9), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 2, 1, 2), ZIndex = 4,
+                BackgroundColor3 = Lib:StatusColor(Lib:LoadStatus().mode), Parent = av })
+            Corner(dot, 5) Stroke(dot, "Surface", 2, 0)
+            win._stDot = dot
+        end
+    end)
+    return win
+end
+
+-- ==================== 13) hooks ====================
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p67 then
+        chat._p67 = true
+        Lib:LoadStatus()
+        Lib:LoadNotifPrefs()
+        local function Try(n, fn)
+            local ok, e = pcall(fn)
+            if not ok then warn("[Aether] " .. n .. ": " .. tostring(e)) end
+        end
+        -- auto correct comes back on once (then it's your choice in User Settings > Chat)
+        Try("auto correct", function()
+            if not FsOk() then return end
+            local p = Lib.ConfigFolder .. "/ac67.txt"
+            if isfile(p) then return end
+            Lib:LoadChatPrefs().AutoCorrect = true
+            Lib:SaveChatPrefs()
+            writefile(p, "1")
+        end)
+        Try("input box", function() chat:_InitInputBox() end)
+        Try("status", function() chat:_InitStatus() end)
+        Try("avatar", function()
+            chat:_UpdateUserPanel()
+            for _, s in ipairs({ 1.5, 4, 10 }) do
+                task.delay(s, function()
+                    if Lib.Unloaded then return end
+                    pcall(function()
+                        local u = chat._up
+                        if u then u.key67 = nil end
+                        chat:_UpdateUserPanel()
+                    end)
+                end)
+            end
+        end)
+        task.delay(2, function() if not Lib.Unloaded then pcall(function() Lib:_PaintStatusDot() end) end end)
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 6.7 =====================
+
+-- ===================== Aether patch 6.8 =====================
+-- Paste right above the final `return Lib` (after patch 6.7).
+do
+local P = {}
+Lib.Version = "6.8.0"
+local CODE_MAX = 10000
+local INDENT = "    "
+
+local function JSONd(body)
+    local ok, d = pcall(function() return HttpService:JSONDecode(body or "") end)
+    return (ok and type(d) == "table") and d or nil
+end
+
+local function H32(s)
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    return string.format("%08x", h)
+end
+
+local function Damerau(a, b)
+    local la, lb = #a, #b
+    if math.abs(la - lb) > 2 then return 3 end
+    local d = {}
+    for i = 0, la do d[i] = { [0] = i } end
+    for j = 0, lb do d[0][j] = j end
+    for i = 1, la do
+        for j = 1, lb do
+            local cost = (a:byte(i) == b:byte(j)) and 0 or 1
+            local v = math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+            if i > 1 and j > 1 and a:byte(i) == b:byte(j - 1) and a:byte(i - 1) == b:byte(j) then
+                v = math.min(v, d[i - 2][j - 2] + 1)
+            end
+            d[i][j] = v
+        end
+    end
+    return d[la][lb]
+end
+
+-- ==================== 1) custom profile picture on every 2D avatar ====================
+do
+    local Orig = GetAvatar
+    GetAvatar = function(userId, cb, kind, size)
+        if tonumber(userId) == LocalPlayer.UserId and Lib.LoadArt then
+            local ok, art = pcall(function() return Lib:LoadArt().pfp end)
+            local chat = Lib.ChatObj
+            if ok and art and chat and chat._ArtImage then
+                local done = false
+                chat:_ArtImage(art, function(a)
+                    done = true
+                    pcall(cb, a)
+                end)
+                -- if the custom image can't be loaded, fall back to the Roblox avatar
+                task.delay(6, function()
+                    if not done then Orig(userId, cb, kind, size) end
+                end)
+                return
+            end
+        end
+        return Orig(userId, cb, kind, size)
+    end
+end
+
+P.SetArt = Lib.SetArt
+function Lib:SetArt(kind, entry)
+    P.SetArt(self, kind, entry)
+    if kind ~= "pfp" then return end
+    local c = self.ChatObj
+    if not c then return end
+    task.delay(0.4, function()
+        pcall(function()
+            c._gcKey = nil
+            c:_RefreshChannel()
+            c:_QueueSidebar()
+        end)
+    end)
+end
+
+-- ==================== 2) autocorrect: careful, saves undone words ====================
+local AC = Lib.AC
+if AC then
+    local function Sq(s)
+        s = tostring(s):lower()
+        local out, last = {}, nil
+        for ch in s:gmatch(".") do
+            if ch ~= last then out[#out + 1] = ch last = ch end
+        end
+        return table.concat(out)
+    end
+    local Long = { "fuck", "shit", "bitch", "cunt", "whore", "slut", "pussy", "bastard", "dick", "cock", "wank", "twat", "bollock", "prick", "douche", "tits", "porn" }
+    local Short = { "ass", "arse", "damn", "hell", "crap", "sex", "cum", "tit", "nude", "piss" }
+    local Suffix = { "", "s", "es", "ed", "er", "ers", "ing", "in", "y", "ie", "head", "hole", "holes", "face", "wit" }
+    local LongSq, ShortSq = {}, {}
+    for _, s in ipairs(Long) do LongSq[#LongSq + 1] = Sq(s) end
+    for _, s in ipairs(Short) do ShortSq[#ShortSq + 1] = Sq(s) end
+
+    -- true when the word is (a variant of) something rude: autocorrect then leaves it alone
+    local function Rude(w)
+        local q = Sq(w)
+        for _, s in ipairs(LongSq) do
+            if q:sub(1, #s) == s or Damerau(q, s) <= 1 then return true end
+        end
+        for _, s in ipairs(ShortSq) do
+            for _, suf in ipairs(Suffix) do
+                if q == s .. suf then return true end
+            end
+        end
+        return false
+    end
+    Lib.ACRude = Rude
+
+    -- decides whether a suggestion from the server is safe to apply. Returns the fix, or "" for "leave it alone".
+    function Lib:_ACJudge(w, fix)
+        fix = tostring(fix or "")
+        if fix == "" then return "" end
+        local lw, lf = w:lower(), fix:lower()
+        if #lw < 4 then return "" end
+        if lf:find("%s") or not lf:match("^[%a']+$") then return "" end
+        if lw:find("(.)%1%1") then return "" end                 -- soooo / bruhhh
+        if lw:sub(1, 1) ~= lf:sub(1, 1) then return "" end       -- first letter must match
+        if Rude(lw) or Rude(lf) then return "" end
+        if Damerau(lw, lf) > 1 then return "" end                -- one edit or one swap only
+        return fix
+    end
+
+    -- the server is still asked, but its answer goes through the judge
+    function Chat:_ACFetch(words)
+        if os.clock() < AC.cool then return false end
+        local need = {}
+        for _, w in ipairs(words) do if AC.cache[w] == nil then need[#need + 1] = w end end
+        for i = 1, #need, 8 do
+            local part = {}
+            for j = i, math.min(i + 7, #need) do part[#part + 1] = need[j] end
+            local d = Decode(self:_Do("/spell", { w = table.concat(part, ",") }))
+            if not (d and d.ok and type(d.r) == "table") then AC.cool = os.clock() + 8 return false end
+            for _, w in ipairs(part) do
+                local v = d.r[w]
+                if type(v) == "string" then AC.cache[w] = Lib:_ACJudge(w, v) end
+            end
+            if d.busy then AC.cool = os.clock() + 6 return false end
+        end
+        return true
+    end
+
+    -- common typos are fixed locally (no server needed)
+    local Typos = {
+        teh = "the", adn = "and", taht = "that", waht = "what", wich = "which", thier = "their", becuase = "because", beacuse = "because",
+        recieve = "receive", definately = "definitely", seperate = "separate", alot = "a lot", freind = "friend", wierd = "weird",
+        tommorow = "tomorrow", untill = "until", occured = "occurred", beleive = "believe", realy = "really", probly = "probably",
+        dont = "don't", doesnt = "doesn't", didnt = "didn't", cant = "can't", isnt = "isn't", wasnt = "wasn't", arent = "aren't",
+        werent = "weren't", couldnt = "couldn't", shouldnt = "shouldn't", wouldnt = "wouldn't", havent = "haven't", hasnt = "hasn't",
+        hadnt = "hadn't", youre = "you're", theyre = "they're",
+    }
+    for k, v in pairs(Typos) do if AC.cache[k] == nil then AC.cache[k] = v end end
+
+    -- words you undo are remembered forever: AC.ignore now saves itself to <Folder>/acdict.txt
+    local userDict, dtick = {}, 0
+    local function DictPath() return Lib.ConfigFolder .. "/acdict.txt" end
+    local function SaveDict()
+        if not FsOk() then return end
+        dtick = dtick + 1
+        local t = dtick
+        task.delay(0.6, function()
+            if t ~= dtick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                local list = {}
+                for w in pairs(userDict) do list[#list + 1] = w end
+                table.sort(list)
+                writefile(DictPath(), table.concat(list, "\n"))
+            end)
+        end)
+    end
+    setmetatable(AC.ignore, { __newindex = function(t, k, v)
+        rawset(t, k, v)
+        if v == true and type(k) == "string" and #k >= 2 and #k <= 24 then
+            userDict[k] = true
+            SaveDict()
+        end
+    end })
+    function Lib:LoadACDict()
+        if self._acDict or not FsOk() then return end
+        self._acDict = true
+        pcall(function()
+            local p = DictPath()
+            if not isfile(p) then return end
+            for w in (readfile(p) .. "\n"):gmatch("(.-)\n") do
+                w = Trim(w):lower()
+                if #w >= 2 and #w <= 24 and w:match("^[%w']+$") then
+                    userDict[w] = true
+                    rawset(AC.ignore, w, true)
+                end
+            end
+        end)
+    end
+end
+
+-- ==================== 3) Share code: editor behaviour + Format button ====================
+local function StripNoise(s)
+    s = s:gsub("%-%-[^\n]*", "")
+    s = s:gsub('"[^"\n]*"', '""')
+    s = s:gsub("'[^'\n]*'", "''")
+    return s
+end
+local function Count(s, pat) return select(2, s:gsub(pat, "")) end
+
+local function Opens(line)
+    local l = StripNoise(line):gsub("%s+$", "")
+    if l:match("%f[%w]do$") or l:match("%f[%w]then$") or l:match("%f[%w]else$") or l:match("%f[%w]repeat$") then return true end
+    if l:find("%f[%w]function%f[%W]") and l:match("%)$") and not l:find("%f[%w]end%f[%W]") then return true end
+    if l:match("%f[%w]function$") then return true end
+    if l:match("[%{%(]$") then return true end
+    return false
+end
+
+local function CloserFor(line)
+    local l = StripNoise(line):gsub("%s+$", "")
+    local t = l:gsub("^%s+", "")
+    if t:match("^else%f[%W]") or t:match("^elseif%f[%W]") then return nil end
+    if l:match("%f[%w]repeat$") then return "until " end
+    if l:match("%f[%w]do$") or l:match("%f[%w]then$") or l:match("%f[%w]function$")
+        or (l:find("%f[%w]function%f[%W]") and l:match("%)$") and not l:find("%f[%w]end%f[%W]")) then
+        return "end"
+    end
+    return nil
+end
+
+local function Balance(code)
+    local s = StripNoise(code)
+    local open = Count(s, "%f[%w]function%f[%W]") + Count(s, "%f[%w]do%f[%W]") + Count(s, "%f[%w]if%f[%W]") + Count(s, "%f[%w]repeat%f[%W]")
+    local close = Count(s, "%f[%w]end%f[%W]") + Count(s, "%f[%w]until%f[%W]")
+    return open - close
+end
+
+local function Reindent(code)
+    code = code:gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("\t", INDENT)
+    local out, level = {}, 0
+    for line in (code .. "\n"):gmatch("(.-)\n") do
+        local s = line:match("^%s*(.-)%s*$")
+        if s == "" then
+            out[#out + 1] = ""
+        else
+            local c = StripNoise(s)
+            local opens = Count(c, "%f[%w]function%f[%W]") + Count(c, "%f[%w]do%f[%W]") + Count(c, "%f[%w]if%f[%W]") + Count(c, "%f[%w]repeat%f[%W]")
+                + Count(c, "%f[%w]else%f[%W]") + Count(c, "%f[%w]elseif%f[%W]") + Count(c, "[%{%(]")
+            local closes = Count(c, "%f[%w]end%f[%W]") + Count(c, "%f[%w]until%f[%W]") + Count(c, "%f[%w]else%f[%W]")
+                + Count(c, "%f[%w]elseif%f[%W]") + Count(c, "[%}%)]")
+            local lead = c:match("^end%f[%W]") or c:match("^until%f[%W]") or c:match("^else%f[%W]") or c:match("^elseif%f[%W]") or c:match("^[%}%)]")
+            local lv = math.max(0, level - (lead and 1 or 0))
+            out[#out + 1] = string.rep(INDENT, lv) .. s
+            level = math.max(0, level + opens - closes)
+        end
+    end
+    return table.concat(out, "\n")
+end
+Lib.FormatLua = Reindent
+
+function Chat:CodeComposer()
+    local langBox, box
+    Lib:Dialog({ Title = "Share code",
+        Text = "Auto-indents and closes blocks as you type. Nothing runs automatically (up to " .. CODE_MAX .. " characters).",
+        Extra = function(card)
+            local row = New("Frame", { Size = UDim2.new(1, 0, 0, H(26)), LayoutOrder = 3, ZIndex = 102, BackgroundTransparency = 1, Parent = card })
+            local lf = New("Frame", { Size = UDim2.new(1, -92, 1, 0), ZIndex = 102, Theme = { BackgroundColor3 = "Field" }, Parent = row })
+            Corner(lf, 5) Stroke(lf, "Stroke", 1, 0.3)
+            langBox = New("TextBox", { Text = "lua", PlaceholderText = "language (optional)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 12,
+                Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = LEFT, ZIndex = 103, Parent = lf })
+            local fmt = New("TextButton", { Text = "Format", TextSize = 12, Size = UDim2.fromOffset(84, H(26)), AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.fromScale(1, 0), BackgroundTransparency = 0, ZIndex = 103, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = row })
+            Corner(fmt, 5)
+            local f = New("Frame", { Size = UDim2.new(1, 0, 0, 200), LayoutOrder = 3, ZIndex = 102, ClipsDescendants = true, Theme = { BackgroundColor3 = "Field" }, Parent = card })
+            Corner(f, 5) Stroke(f, "Stroke", 1, 0.3)
+            box = New("TextBox", { Text = "", PlaceholderText = "Your code...", PlaceholderColor3 = Lib.Theme.Dim, MultiLine = true, TextWrapped = false,
+                Font = Enum.Font.Code, TextSize = 12, Size = UDim2.new(1, -16, 1, -12), Position = UDim2.fromOffset(8, 6), TextXAlignment = LEFT,
+                TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 103, Parent = f })
+
+            local prev, busy = "", false
+            local function Put(text, cursor)
+                busy = true
+                box.Text = text
+                if cursor then box.CursorPosition = cursor end
+                busy = false
+                prev = text
+            end
+            box:GetPropertyChangedSignal("Text"):Connect(function()
+                if busy then prev = box.Text return end
+                local t = box.Text
+                local cur = box.CursorPosition
+                if t:find("\t", 1, true) then
+                    local n = (cur and cur > 1) and select(2, t:sub(1, cur - 1):gsub("\t", "")) or 0
+                    local nt = t:gsub("\t", INDENT)
+                    Put(nt, (cur and cur > 0) and (cur + n * (#INDENT - 1)) or nil)
+                    return
+                end
+                -- exactly one newline was inserted at the cursor
+                if cur and cur > 1 and #t == #prev + 1 and t:sub(cur - 1, cur - 1) == "\n" and (t:sub(1, cur - 2) .. t:sub(cur)) == prev then
+                    local before = t:sub(1, cur - 2)
+                    local line = before:match("([^\n]*)$") or ""
+                    local indent = line:match("^(%s*)") or ""
+                    local add, closer = indent, nil
+                    if Opens(line) then
+                        add = indent .. INDENT
+                        local c = CloserFor(line)
+                        if c and Balance(t) > 0 then closer = c end
+                    end
+                    local nt = t:sub(1, cur - 1) .. add .. (closer and ("\n" .. indent .. closer) or "") .. t:sub(cur)
+                    Put(nt, cur + #add)
+                    return
+                end
+                prev = t
+            end)
+            fmt.Activated:Connect(function()
+                local nt = Reindent(box.Text)
+                Put(nt, #nt + 1)
+            end)
+            return box
+        end,
+        Buttons = { { Text = "Cancel" }, { Text = "Send", Primary = true, Callback = function(body)
+            body = tostring(body or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+            body = Trim(body)
+            if body == "" then return end
+            local lang = Trim(langBox and langBox.Text or ""):gsub("[^%w_%+%-%.#]", "")
+            local msg = "```" .. lang .. "\n" .. body .. "\n```"
+            if #msg > CODE_MAX then
+                Lib:Notify({ Title = "Share code", Text = "That's too long to send (max " .. CODE_MAX .. " characters).", Type = "error" })
+                return
+            end
+            self:Send(msg)
+        end } } })
+end
+
+-- ==================== 4) drafts: saved while typing, restored after the switch ====================
+local function NoTrail(t) return (tostring(t or ""):gsub("[\r\n]+$", "")) end
+
+function Chat:_InitDrafts()
+    if self._dr68 then return end
+    self._dr68 = true
+    local S = Lib:LoadChatState()
+    local input = self.Input
+    input:GetPropertyChangedSignal("Text"):Connect(function()
+        if self._draftGuard then return end
+        local room = self.Room
+        if type(room) ~= "string" then return end
+        local t = NoTrail(input.Text)
+        local v = (Trim(t) ~= "") and t:sub(1, 2000) or nil
+        if S.drafts[room] ~= v then
+            S.drafts[room] = v
+            Lib:SaveChatState()
+        end
+    end)
+end
+
+P.SetChannel = Chat.SetChannel
+function Chat:SetChannel(i)
+    local S = Lib:LoadChatState()
+    local from = self.Room
+    local cur = NoTrail(self.Input.Text)
+    if type(from) == "string" then S.drafts[from] = (Trim(cur) ~= "") and cur:sub(1, 2000) or nil end
+    local r = P.SetChannel(self, i)
+    local room = self.Room
+    local function Restore()
+        if self.Room ~= room then return end
+        local d = S.drafts[room] or ""
+        if self.Input.Text ~= d then
+            self._draftGuard = true
+            self.Input.Text = d
+            self._draftGuard = false
+        end
+    end
+    Restore()
+    task.defer(Restore)
+    Lib:SaveChatState()
+    return r
+end
+
+-- ==================== 5) forwarding images ====================
+local ARROW = utf8.char(0x21AA)
+
+local function FParse(txt)
+    local line, rest = tostring(txt or ""):match("^" .. ARROW .. " Forwarded from ([^\n]*)\n?(.*)$")
+    if not line then return nil end
+    local who, where = line:match("^(.-) · (.+)$")
+    if not who then who, where = line, "" end
+    return who, where, rest
+end
+
+local function FClean(s, n)
+    s = tostring(s or ""):gsub("%c", " ")
+    s = Trim(s):gsub("%s+", " ")
+    local len = utf8.len(s)
+    if len and len > n then s = s:sub(1, utf8.offset(s, n + 1) - 1) elseif not len then s = s:sub(1, n) end
+    return s
+end
+
+local function FBuild(who, where, body, cap)
+    local head = ARROW .. " Forwarded from " .. FClean(who, 32) .. (where ~= "" and (" · " .. FClean(where, 32)) or "")
+    body = tostring(body or "")
+    local room = cap - #head - 1
+    if #body > room then
+        body = body:sub(1, math.max(room - 3, 0))
+        while #body > 0 and not utf8.len(body) do body = body:sub(1, -2) end
+        body = body .. "…"
+        if select(2, body:gsub("```", "")) % 2 == 1 then body = body .. "\n```" end
+    end
+    return head .. "\n" .. body
+end
+
+local function FLabel(t)
+    if t.kind == "dm" then return "@" .. t.name end
+    if t.kind == "grp" then return "«" .. t.name .. "»" end
+    return "#" .. t.name
+end
+
+-- the image's bytes: local cache first, then /imgraw, then /img
+local function GetBytes(self, img, room)
+    pcall(function() CachePath("x", "image/png") end)
+    local path = CachePath(img.id, img.mime)
+    local ok, ex = pcall(isfile, path)
+    if ok and ex then
+        local ok2, b = pcall(readfile, path)
+        if ok2 and type(b) == "string" and #b > 64 then return b end
+    end
+    local res = self:_Do("/imgraw", { id = img.id }, nil, nil, room)
+    if res and res.StatusCode == 200 and type(res.Body) == "string" and #res.Body > 64 and res.Body:sub(1, 1) ~= "{" then return res.Body end
+    local d = Decode(self:_Do("/img", { id = img.id }, nil, nil, room))
+    if d and d.ok and d.data then
+        local ok3, b = pcall(B64Decode, d.data)
+        if ok3 and type(b) == "string" and #b > 64 then return b end
+    end
+end
+
+local function SendTo(self, t, text, b64, mime, imgId, comment)
+    local room = t.room
+    if t.new and not self:_RoomIndex(room) then
+        self:AddDM(t.uid, t.user and t.user.name or t.name, t.name)
+        local q = { after = -1, peer = t.uid }
+        if t.user and t.user.name then q.peer_name = tostring(t.user.name) end
+        if t.name and t.name ~= "" then q.peer_display = tostring(t.name) end
+        self:_Do("/poll", q, nil, nil, room)
+    end
+    local imageId, byRef
+    if b64 then
+        local d = Decode(self:_Do("/upload", nil, "POST", HttpService:JSONEncode({ data = b64, mime = mime }), room))
+        if d and d.ok and d.id then
+            imageId = d.id
+        else
+            -- last resort: point at the original image id
+            imageId, byRef = imgId, true
+            if not imageId then return false, (d and d.error) or "Upload failed." end
+        end
+    end
+    local r = Decode(self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = text, image = imageId }), room))
+    if not (r and r.ok) then return false, (r and r.error) or "Couldn't send." end
+    if comment ~= "" then
+        task.wait(0.85)
+        self:_Do("/send", nil, "POST", HttpService:JSONEncode({ text = comment }), room)
+    end
+    return true, byRef
+end
+
+function Chat:_ForwardRun(src, chosen, comment)
+    local msg = src.msg
+    local who, where, body = FParse(msg.text)
+    if not who then
+        who = tostring((msg.display ~= nil and msg.display ~= "") and msg.display or msg.name or "?")
+        where = (src.ch and not src.ch.kind) and ("#" .. tostring(src.ch.name or "")) or ""
+        body = tostring(msg.text or "")
+    end
+    local cap = math.max(tonumber(self.Config.MaxLength) or 200, 200)
+    local text = FBuild(who, where, body, cap)
+    comment = comment:sub(1, cap)
+    local img = type(msg.image) == "table" and msg.image or nil
+    Lib:Notify({ Title = "Forward", Text = "Forwarding to " .. #chosen .. (#chosen == 1 and " chat..." or " chats..."), Type = "info", Duration = 2 })
+    task.spawn(function()
+        local b64, mime
+        if img then
+            local bytes = GetBytes(self, img, src.room)
+            if not bytes then
+                Lib:Notify({ Title = "Forward", Text = "Couldn't read that image (it may have expired).", Type = "error" })
+                return
+            end
+            local ext = ThumbExt(bytes)
+            mime = ext == ".jpg" and "image/jpeg" or (ext == ".bmp" and "image/bmp" or "image/png")
+            b64 = B64Encode(bytes)
+        end
+        local good, bad, firstErr, byRef = {}, {}, nil, false
+        for i, t in ipairs(chosen) do
+            local ok, err = SendTo(self, t, text, b64, mime, img and img.id or nil, comment)
+            if ok then
+                good[#good + 1] = FLabel(t)
+                if err == true then byRef = true end
+                if t.room == self.Room then
+                    self.Stick = true
+                    self:_PollOnce()
+                end
+            else
+                bad[#bad + 1] = FLabel(t)
+                firstErr = firstErr or err
+            end
+            if i < #chosen then task.wait(0.8) end
+        end
+        self.LastSend = os.clock()
+        if #good > 0 then
+            Lib:Notify({ Title = "Forwarded", Text = "Sent to " .. table.concat(good, ", ") .. ".", Type = "success", Duration = 3 })
+        end
+        if byRef then
+            Lib:Notify({ Title = "Forward", Text = "The upload was refused, so the image was sent by reference. It may not load in other chats.", Type = "warn", Duration = 6 })
+        end
+        if #bad > 0 then
+            Lib:Notify({ Title = "Forward", Text = "Couldn't send to " .. table.concat(bad, ", ") .. ": " .. tostring(firstErr), Type = "error", Duration = 6 })
+        end
+    end)
+end
+
+-- ==================== 6) sidebar: notification markers only on real overrides ====================
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    pcall(function()
+        local N = Lib:LoadNotifPrefs()
+        local used = {}
+        for _, row in ipairs(sb.list:GetChildren()) do
+            if row.Name == "Ch" and row:IsA("TextButton") then
+                local mark
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("ImageLabel") and c.Position == UDim2.new(1, -40, 0.5, 0) then mark = c end
+                end
+                if mark then
+                    local ch
+                    for _, x in ipairs(row:GetChildren()) do
+                        if x:IsA("TextLabel") and not ch then
+                            for _, c2 in ipairs(self.Channels) do
+                                if not used[c2] and tostring(c2.name) == x.Text then ch = c2 used[c2] = true break end
+                            end
+                        end
+                    end
+                    local over = ch and N.rooms[ch.room] ~= nil and N.rooms[ch.room] ~= N.default
+                    if not over then
+                        mark:Destroy()
+                        for _, x in ipairs(row:GetChildren()) do
+                            if x:IsA("TextLabel") and x.TextTransparency == 0.45 then x.TextTransparency = 0 end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- ==================== 7) icons: aliases, fuzzy fallback, extra packs ====================
+do
+    local More = {
+        -- old -> new Lucide names
+        ["alert-circle"] = "circle-alert", ["alert-triangle"] = "triangle-alert", ["alert-octagon"] = "octagon-alert", ["help-circle"] = "circle-help",
+        ["check-circle"] = "circle-check", ["check-circle-2"] = "circle-check-big", ["x-circle"] = "circle-x", ["plus-circle"] = "circle-plus",
+        ["minus-circle"] = "circle-minus", ["pause-circle"] = "circle-pause", ["play-circle"] = "circle-play", ["stop-circle"] = "circle-stop",
+        ["user-circle"] = "circle-user", ["arrow-up-circle"] = "circle-arrow-up", ["arrow-down-circle"] = "circle-arrow-down",
+        ["arrow-left-circle"] = "circle-arrow-left", ["arrow-right-circle"] = "circle-arrow-right",
+        ["check-square"] = "square-check", ["x-square"] = "square-x", ["plus-square"] = "square-plus", ["minus-square"] = "square-minus",
+        ["edit"] = "square-pen", ["edit-2"] = "pencil", ["edit-3"] = "pen-line", ["more-horizontal"] = "ellipsis", ["more-vertical"] = "ellipsis-vertical",
+        ["sidebar"] = "panel-left", ["sidebar-close"] = "panel-left-close", ["loader-2"] = "loader-circle", ["unlock"] = "lock-open",
+        ["wand-2"] = "wand-sparkles", ["clipboard-edit"] = "clipboard-pen", ["file-edit"] = "file-pen", ["mic-2"] = "mic-vocal",
+        ["pie-chart"] = "chart-pie", ["bar-chart"] = "chart-no-axes-column-increasing", ["bar-chart-2"] = "chart-no-axes-column",
+        ["bar-chart-3"] = "chart-column", ["line-chart"] = "chart-line", ["area-chart"] = "chart-area", ["scatter-chart"] = "chart-scatter",
+        ["home"] = "house", ["users-2"] = "users-round", ["user-2"] = "user-round", ["gauge-circle"] = "circle-gauge",
+        -- everyday words
+        close = "x", cross = "x", delete = "trash-2", remove = "minus", add = "plus", gear = "settings", cog = "settings", hamburger = "menu",
+        like = "thumbs-up", dislike = "thumbs-down", chat = "message-square", message = "message-square", comment = "message-square",
+        email = "mail", person = "user", people = "users", profile = "user", account = "user", player = "user", players = "users",
+        bolt = "zap", lightning = "zap", flash = "zap", fire = "flame", game = "gamepad-2", controller = "gamepad-2", aim = "crosshair",
+        aimbot = "crosshair", esp = "scan-eye", visuals = "eye", world = "globe", earth = "globe", internet = "globe", movement = "move",
+        speed = "gauge", fly = "plane", teleport = "map-pin", misc = "layers", combat = "swords", rage = "flame", legit = "shield-check",
+        config = "file-cog", load = "download", script = "file-code", help = "circle-help", question = "circle-help", warning = "triangle-alert",
+        error = "circle-x", success = "circle-check", mute = "bell-off", sound = "volume-2", photo = "image", color = "palette", paint = "paintbrush",
+        theme = "palette", dark = "moon", light = "sun", time = "clock", refresh = "refresh-cw", reload = "refresh-cw", sync = "refresh-cw",
+        paste = "clipboard", share = "share-2", money = "dollar-sign", shop = "shopping-cart", cart = "shopping-cart", tool = "wrench",
+        ai = "bot", anticheat = "shield-alert", bypass = "shield-off", noclip = "ghost", god = "shield-plus", auto = "repeat", farm = "wheat",
+    }
+    local Prev = ResolveIcon
+    ResolveIcon = function(name)
+        local r = Prev(name)
+        if r then return r end
+        local n = tostring(name):lower():gsub("_", "-")
+        local a = More[n]
+        if a then
+            r = Prev(a)
+            if r then return r end
+        end
+        local cands = {
+            n .. "-2", (n:gsub("%-2$", "")), "circle-" .. n, n .. "-circle", "square-" .. n, n .. "-square",
+            (n:gsub("^circle%-", "")), (n:gsub("^square%-", "")), (n:gsub("s$", "")), n .. "s", (n:gsub("%-outline$", "")),
+        }
+        for _, c in ipairs(cands) do
+            if c ~= n and c ~= "" then
+                r = Prev(c)
+                if r then return r end
+            end
+        end
+        return nil
+    end
+end
+
+function Lib:LoadExtraIconSources()
+    local list = {}
+    if getgenv then
+        pcall(function()
+            local g = getgenv().AetherIconSources
+            if type(g) == "table" then for _, u in ipairs(g) do list[#list + 1] = tostring(u) end end
+        end)
+    end
+    if FsOk() then
+        pcall(function()
+            local p = self.ConfigFolder .. "/iconsources.txt"
+            if not isfile(p) then return end
+            for line in (readfile(p) .. "\n"):gmatch("(.-)\n") do
+                line = Trim(line)
+                if line:match("^https?://") then list[#list + 1] = line end
+            end
+        end)
+    end
+    local added = false
+    for _, u in ipairs(list) do
+        if not table.find(self.IconSources, u) then
+            table.insert(self.IconSources, u)
+            added = true
+        end
+    end
+    if added and self.ReloadIcons then self:ReloadIcons() end
+end
+
+-- ==================== 8) background search: big images only ====================
+function Lib:_BgFind(chat, q, page, minW, wide)
+    local out, seen = {}, {}
+    local function Add(r)
+        if not (r.url and r.thumb) or seen[r.url] then return end
+        if minW > 0 and r.w and r.w < minW then return end
+        if wide and r.w and r.h and r.w < r.h * 1.3 then return end
+        seen[r.url] = true
+        out[#out + 1] = r
+    end
+    -- Wikimedia Commons: the width filter runs on their server, so these really are big
+    pcall(function()
+        local fw = minW > 0 and (" filew:>" .. (minW - 1)) or ""
+        local url = "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=30&gsroffset="
+            .. ((page - 1) * 30) .. "&gsrsearch=" .. UrlEncode(q .. " filetype:bitmap" .. fw)
+            .. "&prop=imageinfo&iiprop=url%7Csize%7Cmime&iiurlwidth=1920"
+        local d = JSONd(Fetch(url))
+        local pages = d and d.query and d.query.pages
+        if type(pages) ~= "table" then return end
+        local arr = {}
+        for _, p in pairs(pages) do arr[#arr + 1] = p end
+        table.sort(arr, function(a, b) return (a.index or 0) < (b.index or 0) end)
+        for _, p in ipairs(arr) do
+            local ii = type(p.imageinfo) == "table" and p.imageinfo[1]
+            if ii and ii.url and (ii.mime == "image/jpeg" or ii.mime == "image/png") then
+                local dl = ii.thumburl or ii.url
+                local th = dl:gsub("/1920px%-", "/330px-")
+                Add({ url = dl, alt = th, thumb = th, w = tonumber(ii.width), h = tonumber(ii.height), src = "Wikimedia Commons" })
+            end
+        end
+    end)
+    -- Openverse
+    pcall(function()
+        local base = "https://api.openverse.org/v1/images/?q=" .. UrlEncode(q) .. "&page=" .. page .. "&page_size=20"
+        local tries = {
+            base .. "&extension=jpg,png" .. (minW >= 1280 and "&size=large" or "") .. (wide and "&aspect_ratio=wide" or ""),
+            base,
+        }
+        for _, u in ipairs(tries) do
+            local d = JSONd(Fetch(u))
+            local res = d and d.results
+            if type(res) == "table" and #res > 0 then
+                for _, x in ipairs(res) do
+                    local ext = tostring(x.filetype or ""):lower()
+                    if x.url and (ext == "jpg" or ext == "jpeg" or ext == "png" or ext == "") then
+                        Add({ url = x.url, alt = x.thumbnail, thumb = x.thumbnail or x.url, w = tonumber(x.width), h = tonumber(x.height), src = "Openverse" })
+                    end
+                end
+                return
+            end
+        end
+    end)
+    -- your relay, only if both APIs gave nothing
+    if #out == 0 and chat.Request and chat.Config.Url then
+        local d = Decode(chat:_Do("/search", { q = q, page = page, gif = "0" }))
+        for _, r in ipairs((d and d.ok and d.results) or {}) do
+            if r.url and not tostring(r.url):lower():find("%.gif") then
+                Add({ url = r.url, alt = r.thumb, thumb = r.thumb or r.url, src = "Relay" })
+            end
+        end
+    end
+    return out
+end
+
+function Chat:BgSearch(target, after)
+    if not (FsOk() and (getcustomasset or getsynasset)) then
+        Lib:Notify({ Title = "Background", Text = "Your executor can't load image files. Use an asset id instead.", Type = "warn", Duration = 5 })
+        return
+    end
+    local Z, W, HH = 100, 540, 580
+    local dim = New("TextButton", { Name = "BgSearch", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.5,
+        BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+    local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        ZIndex = Z + 1, Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+    Corner(card, 10) Stroke(card)
+    local vp = Lib.Overlay.AbsoluteSize
+    New("UIScale", { Scale = (vp.X > 0 and vp.Y > 0) and math.min(1, vp.X / (W + 20), vp.Y / (HH + 20)) or 1, Parent = card })
+    local function Close() if dim.Parent then dim:Destroy() end end
+    dim.Activated:Connect(Close)
+    New("TextLabel", { Text = (target == "chat" and "Chat" or "Menu") .. " background", Font = Lib.FontBold, TextSize = 15, Size = UDim2.new(1, -80, 0, 30),
+        Position = UDim2.fromOffset(14, 0), TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+    local closeB = New("TextButton", { Text = "Close", TextSize = 12, Size = UDim2.fromOffset(56, 22), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 4),
+        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+    Corner(closeB, 5)
+    closeB.Activated:Connect(Close)
+
+    local st = { q = "", page = 1, gen = 0, minW = 1280, wide = true }
+    local box = New("TextBox", { Text = "", PlaceholderText = "Search (e.g. city night, mountains, space)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 13,
+        Size = UDim2.new(1, -100, 0, 30), Position = UDim2.fromOffset(12, 34), BackgroundTransparency = 0, TextXAlignment = LEFT, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+    Corner(box, 6) Pad(box, 10, 0, 10, 0)
+    local goBtn = New("TextButton", { Text = "Search", TextSize = 12, Size = UDim2.fromOffset(70, 30), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 34),
+        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+    Corner(goBtn, 6)
+
+    local Run
+    local function ChipRow(y, label, opts, getv, setv)
+        New("TextLabel", { Text = label, TextSize = 11, Size = UDim2.fromOffset(44, 24), Position = UDim2.fromOffset(14, y), TextXAlignment = LEFT, ZIndex = Z + 2,
+            Theme = { TextColor3 = "Dim" }, Parent = card })
+        local f = New("Frame", { Size = UDim2.new(1, -70, 0, 24), Position = UDim2.fromOffset(58, y), BackgroundTransparency = 1, ZIndex = Z + 2, Parent = card })
+        List(f, 4, Enum.FillDirection.Horizontal)
+        local btns = {}
+        local function Paint()
+            for v, b in pairs(btns) do
+                local on = v == getv()
+                b.BackgroundColor3 = on and Lib.Theme.Accent or Lib.Theme.Field
+                b.TextColor3 = on and Lib.KnobOn() or Lib.Theme.SubText
+            end
+        end
+        for i, o in ipairs(opts) do
+            local b = New("TextButton", { Text = o[2], TextSize = 11, AutomaticSize = X, Size = UDim2.fromOffset(0, 24), LayoutOrder = i, BackgroundTransparency = 0, ZIndex = Z + 3, Parent = f })
+            Corner(b, 12) Pad(b, 10, 0, 10, 0)
+            btns[o[1]] = b
+            b.Activated:Connect(function()
+                setv(o[1])
+                Paint()
+                if st.q ~= "" then Run(1) end
+            end)
+        end
+        Paint()
+    end
+    ChipRow(72, "Size", { { 0, "Any size" }, { 1280, "HD 1280+" }, { 1920, "Full HD 1920+" } }, function() return st.minW end, function(v) st.minW = v end)
+    ChipRow(100, "Shape", { { true, "Wide" }, { false, "Any shape" } }, function() return st.wide end, function(v) st.wide = v end)
+
+    local grid = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -166), Position = UDim2.fromOffset(8, 132), AutomaticCanvasSize = Y, ScrollBarThickness = 3, ZIndex = Z + 2, Parent = card })
+    New("UIGridLayout", { CellSize = UDim2.fromOffset(160, 100), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = grid })
+    local status = New("TextLabel", { Text = "Type something and press Enter. Large images only by default.", TextSize = 11, Size = UDim2.new(1, -24, 0, 16),
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -8), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 2,
+        Theme = { TextColor3 = "Dim" }, Parent = card })
+
+    local function Tile(r, order)
+        local b = New("TextButton", { Text = "", LayoutOrder = order, BackgroundTransparency = 0, ZIndex = Z + 3, Theme = { BackgroundColor3 = "Field" }, Parent = grid })
+        Corner(b, 6)
+        local pic = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, ZIndex = Z + 4, Parent = b })
+        Corner(pic, 6)
+        local tag = r.w and (r.w .. "×" .. tostring(r.h or "?")) or "size unknown"
+        local lab = New("TextLabel", { Text = tag, TextSize = 10, Font = Lib.FontBold, Size = UDim2.fromOffset(0, 14), AutomaticSize = X, AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0, 4, 1, -4), BackgroundTransparency = 0.25, BackgroundColor3 = Color3.new(0, 0, 0), TextColor3 = WHITE, ZIndex = Z + 5, Parent = b })
+        Corner(lab, 3) Pad(lab, 4, 0, 4, 0)
+        Lib:AddTooltip(b, tostring(r.src or ""))
+        task.spawn(function()
+            task.wait(((order - 1) % 12) * 0.06)
+            if not pic.Parent then return end
+            local base = Lib.ConfigFolder .. "/cache/bgth_" .. H32(r.thumb)
+            local asset
+            for _, ext in ipairs({ ".jpg", ".png", ".bmp" }) do
+                local ok, ex = pcall(isfile, base .. ext)
+                if ok and ex then asset = CustomAsset(base .. ext) break end
+            end
+            if not asset then
+                local body = Fetch(r.thumb)
+                local ext = type(body) == "string" and ThumbExt(body)
+                if ext then
+                    pcall(function() CachePath("x", "image/png") end)
+                    if pcall(writefile, base .. ext, body) then asset = CustomAsset(base .. ext) end
+                end
+            end
+            if asset and pic.Parent then pic.Image = asset end
+        end)
+        b.Activated:Connect(function()
+            Close()
+            Lib:Notify({ Title = "Background", Text = "Downloading " .. tag .. "...", Type = "info", Duration = 3 })
+            self:_FetchBg({ url = r.url, fallback = r.alt }, function(path)
+                if not path then
+                    Lib:Notify({ Title = "Background", Text = "Couldn't download that image. Try another.", Type = "error", Duration = 5 })
+                    return
+                end
+                Lib:SetBg(target, "file:" .. path)
+                Lib:Notify({ Title = "Background", Text = (target == "chat" and "Chat" or "Menu") .. " background applied.", Type = "success", Duration = 2.5 })
+                if after then Safe(after) end
+            end)
+        end)
+    end
+
+    Run = function(page)
+        st.gen = st.gen + 1
+        local gen = st.gen
+        st.page = page
+        if page == 1 then
+            for _, c in ipairs(grid:GetChildren()) do if not c:IsA("UIGridLayout") then c:Destroy() end end
+        else
+            local m = grid:FindFirstChild("More")
+            if m then m:Destroy() end
+        end
+        status.Text = "Searching..."
+        task.spawn(function()
+            local list = Lib:_BgFind(self, st.q, page, st.minW, st.wide)
+            if gen ~= st.gen or not card.Parent then return end
+            for i, r in ipairs(list) do Tile(r, (page - 1) * 1000 + i) end
+            if #list == 0 and page == 1 then
+                status.Text = "No results. Try other words, or choose \"Any size\" / \"Any shape\"."
+            else
+                status.Text = "Tap an image to use it. Sources: Wikimedia Commons, Openverse."
+            end
+            if #list > 0 then
+                local more = New("TextButton", { Name = "More", Text = "More results", TextSize = 12, LayoutOrder = page * 1000 + 999, BackgroundTransparency = 0, ZIndex = Z + 3,
+                    Theme = { BackgroundColor3 = "Field", TextColor3 = "Accent" }, Parent = grid })
+                Corner(more, 6)
+                more.Activated:Connect(function() Run(page + 1) end)
+            end
+        end)
+    end
+    local function Go()
+        local t = Trim(box.Text)
+        if t == "" then return end
+        st.q = t
+        Run(1)
+    end
+    goBtn.Activated:Connect(Go)
+    box.FocusLost:Connect(function(enter) if enter then Go() end end)
+    if not Lib.Touch then task.defer(function() if box.Parent then box:CaptureFocus() end end) end
+end
+
+-- ==================== 9) wiring ====================
+function Chat:_InitP68()
+    local function Try(n, fn)
+        local ok, e = pcall(fn)
+        if not ok then warn("[Aether] " .. n .. ": " .. tostring(e)) end
+    end
+    -- autocorrect is OFF by default: forced off once, then it's your choice
+    Try("autocorrect default", function()
+        if not FsOk() then Lib:LoadChatPrefs().AutoCorrect = false return end
+        local p = Lib.ConfigFolder .. "/ac68.txt"
+        if isfile(p) then return end
+        Lib:LoadChatPrefs().AutoCorrect = false
+        Lib:SaveChatPrefs()
+        writefile(p, "1")
+        local t = Lib.Toggles.AutoCorrect
+        if t then t:SetValue(false, true) end
+    end)
+    Try("autocorrect dictionary", function() Lib:LoadACDict() end)
+    Try("drafts", function() self:_InitDrafts() end)
+    Try("icon packs", function() Lib:LoadExtraIconSources() end)
+    Try("sidebar", function() self:_QueueSidebar() end)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p68 then
+        chat._p68 = true
+        chat:_InitP68()
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 6.8 =====================
+
+-- ===================== Aether patch 6.9 =====================
+-- Paste right above the final `return Lib` (after patch 6.8).
+--
+--  1) The private server check is gone. The client ignores "priv" from the relay everywhere
+--     (profile cards, friends, presence cards, join buttons), so nobody is ever shown as "in a private server".
+--  2) Background image search uses the SAME search as the profile picture / banner / send image
+--     (the relay's /search). The nicer "Chat background" window is kept, the Size / Shape filters are gone.
+--  3) Forwarding an image no longer shows the "upload was refused" notification.
+do
+local P = {}
+Lib.Version = "6.9.1"
+
+-- ==================== 1) no private server handling ====================
+local function StripPriv(t, depth)
+    if type(t) ~= "table" or depth > 5 then return end
+    t.priv = nil
+    for _, v in pairs(t) do
+        if type(v) == "table" then StripPriv(v, depth + 1) end
+    end
+end
+
+-- every decoded relay answer (users, friends, messages, groups, profiles) loses its "priv" field
+local PrevDecode = Decode
+Decode = function(res)
+    local d = PrevDecode(res)
+    if d then StripPriv(d, 0) end
+    return d
+end
+
+-- profile cards opened from a message / list entry that still carries "priv"
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    if type(u) == "table" and u.priv ~= nil then
+        local c = {}
+        for k, v in pairs(u) do if k ~= "priv" then c[k] = v end end
+        u = c
+    end
+    return P.ShowProfile(self, u)
+end
+
+-- ==================== 2) background search = the profile picture search ====================
+local function IsGifR(r)
+    if r.gif then return true end
+    return tostring(r.url or ""):lower():find("%.gif%f[%W]") ~= nil
+end
+
+function Chat:BgSearch(target, after)
+    if not (FsOk() and (getcustomasset or getsynasset)) then
+        Lib:Notify({ Title = "Background", Text = "Your executor can't load image files. Use an asset id instead.", Type = "warn", Duration = 5 })
+        return
+    end
+    if not (self.Alive and self.Request and self.Config.Url) then
+        Lib:Notify({ Title = "Background", Text = "Image search needs the chat to be connected.", Type = "warn", Duration = 4 })
+        return
+    end
+    local Z, W, HH = 100, 520, 520
+    local dim = New("TextButton", { Name = "BgSearch", Text = "", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.5,
+        BackgroundColor3 = Color3.new(0, 0, 0), ZIndex = Z, Parent = Lib.Overlay })
+    local card = Sink(New("Frame", { Size = UDim2.fromOffset(W, HH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        ZIndex = Z + 1, Theme = { BackgroundColor3 = "Bg" }, Parent = dim }))
+    Corner(card, 10) Stroke(card)
+    local vp = Lib.Overlay.AbsoluteSize
+    New("UIScale", { Scale = (vp.X > 0 and vp.Y > 0) and math.min(1, vp.X / (W + 20), vp.Y / (HH + 20)) or 1, Parent = card })
+    local function Close() if dim.Parent then dim:Destroy() end end
+    dim.Activated:Connect(Close)
+    New("TextLabel", { Text = (target == "chat" and "Chat" or "Menu") .. " background", Font = Lib.FontBold, TextSize = 15, Size = UDim2.new(1, -80, 0, 30),
+        Position = UDim2.fromOffset(14, 0), TextXAlignment = LEFT, ZIndex = Z + 2, Parent = card })
+    local closeB = New("TextButton", { Text = "Close", TextSize = 12, Size = UDim2.fromOffset(56, 22), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 4),
+        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+    Corner(closeB, 5)
+    closeB.Activated:Connect(Close)
+
+    local st = { q = "", page = 1, gen = 0 }
+    local box = New("TextBox", { Text = "", PlaceholderText = "Search (e.g. city night, mountains, space)", PlaceholderColor3 = Lib.Theme.Dim, TextSize = 13,
+        Size = UDim2.new(1, -100, 0, 30), Position = UDim2.fromOffset(12, 34), BackgroundTransparency = 0, TextXAlignment = LEFT, ZIndex = Z + 2,
+        Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" }, Parent = card })
+    Corner(box, 6) Pad(box, 10, 0, 10, 0)
+    local goBtn = New("TextButton", { Text = "Search", TextSize = 12, Size = UDim2.fromOffset(70, 30), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 34),
+        BackgroundTransparency = 0, ZIndex = Z + 2, Theme = { BackgroundColor3 = "Accent", TextColor3 = "OnAccent" }, Parent = card })
+    Corner(goBtn, 6)
+
+    local grid = New("ScrollingFrame", { Size = UDim2.new(1, -16, 1, -106), Position = UDim2.fromOffset(8, 72), AutomaticCanvasSize = Y, ScrollBarThickness = 3, ZIndex = Z + 2, Parent = card })
+    New("UIGridLayout", { CellSize = UDim2.fromOffset(104, 104), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = grid })
+    local status = New("TextLabel", { Text = "Type something and press Enter.", TextSize = 11, Size = UDim2.new(1, -24, 0, 16),
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -8), TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = Z + 2,
+        Theme = { TextColor3 = "Dim" }, Parent = card })
+
+    local function Tile(r, order)
+        local b = New("TextButton", { Text = "", LayoutOrder = order, BackgroundTransparency = 0, ZIndex = Z + 3, Theme = { BackgroundColor3 = "Field" }, Parent = grid })
+        Corner(b, 6)
+        local pic = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, ZIndex = Z + 4, Parent = b })
+        Corner(pic, 6)
+        Lib:AddTooltip(b, r.title)
+        -- same thumbnail path (and cache) as the profile picture search
+        task.spawn(function()
+            local base = Lib.ConfigFolder .. "/cache/th_" .. tostring(r.id)
+            local asset
+            for _, ext in ipairs({ ".jpg", ".png", ".bmp" }) do
+                local ok, ex = pcall(isfile, base .. ext)
+                if ok and ex then asset = CustomAsset(base .. ext) break end
+            end
+            if not asset then
+                local res = self:_Do("/thumb", { u = r.thumb })
+                if res and res.StatusCode == 200 and type(res.Body) == "string" and #res.Body > 64 and res.Body:sub(1, 1) ~= "{" then
+                    local ext = ThumbExt(res.Body)
+                    if ext then
+                        CachePath("x", "image/png")
+                        if pcall(writefile, base .. ext, res.Body) then asset = CustomAsset(base .. ext) end
+                    end
+                end
+            end
+            if asset and pic.Parent then pic.Image = asset end
+        end)
+        b.Activated:Connect(function()
+            Close()
+            Lib:Notify({ Title = "Background", Text = "Downloading...", Type = "info", Duration = 2 })
+            self:_FetchBg({ url = r.url, fallback = r.thumb }, function(path)
+                if not path then
+                    Lib:Notify({ Title = "Background", Text = "Couldn't download that image. Try another.", Type = "error", Duration = 5 })
+                    return
+                end
+                Lib:SetBg(target, "file:" .. path)
+                Lib:Notify({ Title = "Background", Text = (target == "chat" and "Chat" or "Menu") .. " background applied.", Type = "success", Duration = 2.5 })
+                if after then Safe(after) end
+            end)
+        end)
+    end
+
+    local Run
+    Run = function(page)
+        st.gen = st.gen + 1
+        local gen = st.gen
+        st.page = page
+        if page == 1 then
+            for _, c in ipairs(grid:GetChildren()) do if not c:IsA("UIGridLayout") then c:Destroy() end end
+        else
+            local m = grid:FindFirstChild("More")
+            if m then m:Destroy() end
+        end
+        status.Text = "Searching..."
+        task.spawn(function()
+            local d = Decode(self:_Do("/search", { q = st.q, page = page, gif = "0" }))
+            if gen ~= st.gen or not card.Parent then return end
+            if not (d and d.ok) then status.Text = (d and d.error) or "Search failed. Is your worker updated?" return end
+            local shown = 0
+            for i, r in ipairs(d.results or {}) do
+                if not IsGifR(r) then
+                    shown = shown + 1
+                    Tile(r, (page - 1) * 100 + i)
+                end
+            end
+            status.Text = (shown == 0 and page == 1) and "No results." or "Tap an image to use it."
+            if d.more then
+                local more = New("TextButton", { Name = "More", Text = "More results", TextSize = 12, LayoutOrder = page * 100 + 99, BackgroundTransparency = 0, ZIndex = Z + 3,
+                    Theme = { BackgroundColor3 = "Field", TextColor3 = "Accent" }, Parent = grid })
+                Corner(more, 6)
+                more.Activated:Connect(function() Run(page + 1) end)
+            end
+        end)
+    end
+    local function Go()
+        local t = Trim(box.Text)
+        if t == "" then return end
+        st.q = t
+        Run(1)
+    end
+    goBtn.Activated:Connect(Go)
+    box.FocusLost:Connect(function(enter) if enter then Go() end end)
+    if not Lib.Touch then task.defer(function() if box.Parent then box:CaptureFocus() end end) end
+end
+
+-- ==================== 3) forwarding images: no "upload was refused" notification ====================
+P.Notify = Lib.Notify
+function Lib:Notify(a, b, c)
+    if type(a) == "table" and a.Title == "Forward" and type(a.Text) == "string" and a.Text:find("upload was refused", 1, true) then
+        return
+    end
+    return P.Notify(self, a, b, c)
+end
+
+end
+-- ===================== end patch 6.9 =====================
 
 return Lib
