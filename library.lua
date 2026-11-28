@@ -21369,4 +21369,3310 @@ end
 end
 -- ===================== end patch 6.9 =====================
 
+
+-- ===================== Aether patch 7.0 (looks + discord chat v2) =====================
+-- Paste right above the final `return Lib` (after patch 6.9).
+do
+local P = {}
+Lib.Version = "7.0.0"
+
+-- ---------- 0) saved look prefs (<Folder>/look.json) ----------
+Lib.Look = { Rows = true, Fold = {} }
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/look.json" end
+
+    function Lib:LoadLook()
+        if loaded then return self.Look end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                if type(d.rows) == "boolean" then self.Look.Rows = d.rows end
+                if type(d.fold) == "table" then
+                    for k, v in pairs(d.fold) do
+                        if type(k) == "string" and v == true then self.Look.Fold[k] = true end
+                    end
+                end
+            end)
+        end
+        return self.Look
+    end
+
+    function Lib:SaveLook()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.6, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                writefile(Path(), HttpService:JSONEncode({ rows = Lib.Look.Rows, fold = Lib.Look.Fold }))
+            end)
+        end)
+    end
+end
+
+-- ---------- 1) themes + accent preset ----------
+Lib.Themes.Discord = { Bg = Color3.fromRGB(49, 51, 56), Surface = Color3.fromRGB(43, 45, 49), Card = Color3.fromRGB(43, 45, 49),
+    Field = Color3.fromRGB(56, 58, 64), FieldHover = Color3.fromRGB(65, 67, 74), Stroke = Color3.fromRGB(30, 31, 34),
+    Text = Color3.fromRGB(242, 243, 245), SubText = Color3.fromRGB(181, 186, 193), Dim = Color3.fromRGB(128, 132, 142) }
+Lib.Themes.Amoled = { Bg = Color3.fromRGB(0, 0, 0), Surface = Color3.fromRGB(10, 10, 12), Card = Color3.fromRGB(12, 12, 15),
+    Field = Color3.fromRGB(22, 22, 27), FieldHover = Color3.fromRGB(32, 32, 38), Stroke = Color3.fromRGB(34, 34, 40),
+    Text = Color3.fromRGB(235, 235, 240), SubText = Color3.fromRGB(150, 150, 160), Dim = Color3.fromRGB(100, 100, 110) }
+Lib.Themes.Nord = { Bg = Color3.fromRGB(36, 41, 51), Surface = Color3.fromRGB(43, 48, 59), Card = Color3.fromRGB(46, 52, 64),
+    Field = Color3.fromRGB(59, 66, 82), FieldHover = Color3.fromRGB(67, 76, 94), Stroke = Color3.fromRGB(76, 86, 106),
+    Text = Color3.fromRGB(229, 233, 240), SubText = Color3.fromRGB(167, 175, 190), Dim = Color3.fromRGB(120, 130, 148) }
+Lib.Presets.Blurple = Color3.fromRGB(88, 101, 242)
+
+-- ---------- 2) tween guard: styled chat rows keep their transparent bubble ----------
+local PrevTween = Tween
+Tween = function(inst, props, ...)
+    if typeof(inst) == "Instance" and type(props) == "table" and props.BackgroundTransparency ~= nil and inst:GetAttribute("p70flat") then
+        local rest, n = {}, 0
+        for k, v in pairs(props) do
+            if k ~= "BackgroundTransparency" then rest[k] = v n = n + 1 end
+        end
+        if n == 0 then
+            return { Completed = Signal.new(), Cancel = function() end, Play = function() end, Pause = function() end }
+        end
+        props = rest
+    end
+    return PrevTween(inst, props, ...)
+end
+Lib.Tween = Tween
+
+-- ---------- 3) sidebar rail: discord-style left pill ----------
+function Lib:_P70Rail(rail)
+    if not rail or rail._p70 then return end
+    rail._p70 = true
+    local bar = rail.Bar
+    bar.AnchorPoint = Vector2.new(0, 0.5)
+    bar.Position = UDim2.new(0, 0, 0.5, 0)
+    bar.BackgroundTransparency = 0
+    bar.Size = UDim2.fromOffset(4, rail.Active and 22 or 0)
+    local cr = bar:FindFirstChildOfClass("UICorner")
+    if cr then cr.CornerRadius = UDim.new(0, 2) end
+    rail.Style = function(self2, active)
+        self2.Active = active
+        Tween(self2.Fill, { BackgroundTransparency = active and 0 or 1 }, 0.14)
+        Tween(self2.Bar, { Size = UDim2.fromOffset(4, active and 22 or 0) }, 0.16, Enum.EasingStyle.Quint)
+        Tint(self2.Icon, active and Lib.Theme.Text or Lib.Theme.SubText)
+        if self2.Label then Tween(self2.Label, { TextColor3 = active and Lib.Theme.Text or Lib.Theme.SubText }, 0.14) end
+    end
+    rail.Button.MouseEnter:Connect(function()
+        if not rail.Active then Tween(rail.Bar, { Size = UDim2.fromOffset(4, 10) }, 0.1) end
+    end)
+    rail.Button.MouseLeave:Connect(function()
+        if not rail.Active then Tween(rail.Bar, { Size = UDim2.fromOffset(4, 0) }, 0.1) end
+    end)
+end
+
+P.AddTab = Window.AddTab
+function Window:AddTab(name, icon, hidden)
+    local tab = P.AddTab(self, name, icon, hidden)
+    pcall(function() Lib:_P70Rail(tab.Rail) end)
+    return tab
+end
+
+-- ---------- 4) window: header divider, groupbox look ----------
+P.CreateWindow = Lib.CreateWindow
+function Lib:CreateWindow(cfg)
+    local win = P.CreateWindow(self, cfg)
+    pcall(function()
+        New("Frame", { Name = "HeaderLine", Size = UDim2.new(1, -(win.SW + 1), 0, 1), Position = UDim2.fromOffset(win.SW + 1, 45),
+            BackgroundTransparency = 0.55, Theme = { BackgroundColor3 = "Stroke" }, Parent = win.Main })
+    end)
+    return win
+end
+
+P.AddGroupbox = SubTab.AddGroupbox
+function SubTab:AddGroupbox(name, side, opts)
+    local box = P.AddGroupbox(self, name, side, opts)
+    pcall(function()
+        local f = box.Frame
+        local cr = f:FindFirstChildOfClass("UICorner")
+        if cr then cr.CornerRadius = UDim.new(0, 8) end
+        local g = Instance.new("UIGradient")
+        g.Rotation = 90
+        g.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(0.93, 0.93, 0.95))
+        g.Parent = f
+    end)
+    return box
+end
+
+-- ---------- 5) chat: message rows ----------
+function Chat:_FlatFix(item)
+    if not (item and item.Parent) then return end
+    local meta = self.Meta[item]
+    if not (meta and meta.flat) then return end
+    local col = item:FindFirstChild("Col")
+    if not col then return end
+    col.Size = UDim2.new(1, meta.p70 and -48 or -36, 0, 0)
+    local bubble = col:FindFirstChild("Bubble")
+    if bubble then bubble.Size = UDim2.new(1, 0, 0, 0) end
+end
+
+function Chat:_P70Style(item, msg, meta)
+    if meta.p70 then return end
+    meta.p70 = true
+    local AV, GAP = 36, 10
+    local av = item:FindFirstChild("Avatar")
+    local isStart = av ~= nil and av.Active
+    local pad = item:FindFirstChildOfClass("UIPadding")
+    if pad then
+        pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 8)
+        pad.PaddingTop, pad.PaddingBottom = UDim.new(0, isStart and 10 or 1), UDim.new(0, 2)
+    end
+    local lay = item:FindFirstChildOfClass("UIListLayout")
+    if lay then lay.Padding = UDim.new(0, GAP) end
+
+    local tm = ""
+    if type(msg.ts) == "number" then pcall(function() tm = os.date("%H:%M", math.floor(msg.ts / 1000)) end) end
+
+    if av then
+        local cr = av:FindFirstChildOfClass("UICorner")
+        if cr then cr.CornerRadius = UDim.new(0, AV / 2) end
+        if isStart then
+            av.Size = UDim2.fromOffset(AV, AV)
+        else
+            -- continuation message: an empty gutter that shows the time on hover
+            av.Size = UDim2.fromOffset(AV, 20)
+            local t = New("TextLabel", { Name = "HoverTime", Text = tm, TextSize = 10, Size = UDim2.new(1, 0, 0, 14), Position = UDim2.fromOffset(0, 3),
+                Visible = false, Theme = { TextColor3 = "Dim" }, Parent = av })
+            item.MouseEnter:Connect(function() t.Visible = true end)
+            item.MouseLeave:Connect(function() t.Visible = false end)
+        end
+    end
+
+    local col = item:FindFirstChild("Col")
+    local bubble = col and col:FindFirstChild("Bubble")
+    if col and isStart then
+        local head = col:FindFirstChildOfClass("TextLabel")
+        if head then
+            head.TextSize = 15
+            head.Size = UDim2.new(1, 0, 0, 20)
+            head.Text = (head.Text:gsub("(<font color='#%x+')>(%d%d:%d%d)</font>$", "%1 size='11'>%2</font>"))
+        end
+    end
+
+    local mention = false
+    if bubble then
+        bubble:SetAttribute("p70flat", true)
+        mention = (tonumber(bubble:GetAttribute("rest")) or 0) > 0
+        bubble.BackgroundTransparency = 1
+        local st = bubble:FindFirstChildOfClass("UIStroke")
+        if st then st:Destroy() end
+        local bp = bubble:FindFirstChildOfClass("UIPadding")
+        if bp then
+            bp.PaddingLeft, bp.PaddingRight = UDim.new(0, 0), UDim.new(0, 0)
+            bp.PaddingTop, bp.PaddingBottom = UDim.new(0, 1), UDim.new(0, 1)
+        end
+        local quote = bubble:FindFirstChild("Quote")
+        if quote then quote.BackgroundTransparency = 1 end
+    end
+
+    if mention then
+        -- left stripe + tint, drawn with one gradient so it needs no extra layout child
+        Lib:Themed(item, "BackgroundColor3", "Warn")
+        item.BackgroundTransparency = 0
+        local g = Instance.new("UIGradient")
+        g.Parent = item
+        local function Fit()
+            local w = math.max(item.AbsoluteSize.X, 60)
+            local t = Clamp((3 * math.max(Lib.Scale, 0.5)) / w, 0.003, 0.2)
+            g.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(t, 0),
+                NumberSequenceKeypoint.new(t + 0.0001, 0.9), NumberSequenceKeypoint.new(1, 0.9) })
+        end
+        item:GetPropertyChangedSignal("AbsoluteSize"):Connect(Fit)
+        Fit()
+    else
+        Lib:Themed(item, "BackgroundColor3", "FieldHover")
+        item.MouseEnter:Connect(function() Tween(item, { BackgroundTransparency = 0.78 }, 0.06) end)
+        item.MouseLeave:Connect(function() Tween(item, { BackgroundTransparency = 1 }, 0.1) end)
+    end
+
+    if meta.body and meta.body.TextSize == 13 then meta.body.TextSize = 14 end
+    self:_FlatFix(item)
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local last = self.Items[#self.Items]
+    local res = P.AddMessage(self, msg)
+    local item = self.Items[#self.Items]
+    local meta = item and item ~= last and self.Meta[item]
+    if meta and meta.msg == msg and meta.flat and Lib:LoadLook().Rows and Lib.Skin.MsgStyle ~= "Bubbles" then
+        local ok, err = pcall(function() self:_P70Style(item, msg, meta) end)
+        if not ok then warn("[Aether] roomy rows: " .. tostring(err)) end
+    end
+    return res
+end
+
+P.RenderReactions = Chat._RenderReactions
+function Chat:_RenderReactions(item, list)
+    P.RenderReactions(self, item, list)
+    pcall(function()
+        local col = item and item:FindFirstChild("Col")
+        local row = col and col:FindFirstChild("Reacts")
+        if not row then return end
+        for _, chip in ipairs(row:GetChildren()) do
+            if chip:IsA("TextButton") then
+                local cr = chip:FindFirstChildOfClass("UICorner")
+                if cr then cr.CornerRadius = UDim.new(0, 7) end
+                chip.TextSize = 13
+            end
+        end
+    end)
+end
+
+-- ---------- 6) chat: sidebar sections + unread pill ----------
+local FoldKeys = { favorites = true, channels = true, ["direct messages"] = true, groups = true }
+
+local function HeaderInfo(c)
+    if not c:IsA("Frame") or c.Name == "PresenceCard" then return nil end
+    local lab = c:FindFirstChildWhichIsA("TextLabel")
+    if not lab then return nil end
+    local k = lab.Text:lower()
+    if FoldKeys[k] then return k, lab end
+    return nil
+end
+
+function Chat:_P70Row(row, used)
+    local ch
+    for _, x in ipairs(row:GetChildren()) do
+        if x:IsA("TextLabel") and not ch then
+            for _, c2 in ipairs(self.Channels) do
+                if not used[c2] and tostring(c2.name) == x.Text then ch = c2 used[c2] = true break end
+            end
+        end
+    end
+    if not ch or row:FindFirstChild("NavPill") then return ch end
+    local cur = ch == self.Channels[self.ChIndex]
+    if not cur and (ch.unread or 0) > 0 then
+        local pill = New("Frame", { Name = "NavPill", Size = UDim2.fromOffset(3, 8), AnchorPoint = Vector2.new(0, 0.5),
+            Position = UDim2.new(0, -3, 0.5, 0), ZIndex = 4, Theme = { BackgroundColor3 = "Text" }, Parent = row })
+        Corner(pill, 2)
+    end
+    return ch
+end
+
+function Chat:_P70Sidebar(sb)
+    local fold = Lib:LoadLook().Fold
+    local kids = {}
+    for _, c in ipairs(sb.list:GetChildren()) do
+        if c:IsA("GuiObject") then kids[#kids + 1] = c end
+    end
+    table.sort(kids, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+    local section, used = nil, {}
+    for _, c in ipairs(kids) do
+        local key, lab = HeaderInfo(c)
+        if key then
+            section = key
+            if not c:FindFirstChild("FoldHit") then
+                lab.Position = UDim2.fromOffset(18, 0)
+                lab.Size = UDim2.new(1, -44, 1, 0)
+                Lib.Icon("chevron-down", 10, "Dim", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0),
+                    Rotation = fold[key] and -90 or 0, Parent = c }, "v")
+                local hit = New("TextButton", { Name = "FoldHit", Text = "", Size = UDim2.new(1, -24, 1, 0), ZIndex = 3, Parent = c })
+                hit.Activated:Connect(function()
+                    local f = Lib:LoadLook().Fold
+                    f[key] = (not f[key]) or nil
+                    Lib:SaveLook()
+                    self:_QueueSidebar()
+                end)
+            end
+        elseif c:IsA("TextLabel") then
+            section = nil -- "Playing now" header: never folded
+        elseif c.Name == "Ch" and c:IsA("TextButton") then
+            local ch = self:_P70Row(c, used)
+            local keep = ch ~= nil and (ch == self.Channels[self.ChIndex] or (ch.unread or 0) > 0)
+            if section and fold[section] and not keep then c.Visible = false end
+        end
+    end
+end
+
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local ok, err = pcall(function() self:_P70Sidebar(sb) end)
+    if not ok then warn("[Aether] sidebar sections: " .. tostring(err)) end
+end
+
+-- ---------- 7) chat: placeholder + header text ----------
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+    P.RefreshChannel(self)
+    pcall(function()
+        local ch = self.Channels and self.Channels[self.ChIndex]
+        if self.Config and ch then
+            local mark = ch.kind == "dm" and "@" or (ch.kind == "grp" and "" or "#")
+            self.Config.Placeholder = "Message " .. mark .. tostring(ch.name or "")
+        end
+        if self.Wide and self.ChLabel then
+            self.ChLabel.Text = (self.ChLabel.Text:gsub(" <font color='#%x+'>%(%d+/%d+%)</font>", ""))
+        end
+    end)
+end
+
+P.SidebarLayout = Chat._SidebarLayout
+function Chat:_SidebarLayout()
+    local was = self.Wide
+    P.SidebarLayout(self)
+    if was ~= self.Wide then pcall(function() self:_RefreshChannel() end) end
+end
+
+-- ---------- 8) chat: one-time tweaks ----------
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p70 then
+        chat._p70 = true
+        Lib:LoadLook()
+        pcall(function()
+            chat.List.ScrollBarThickness = 6
+            Lib:Themed(chat.List, "ScrollBarImageColor3", "Dim")
+            local frame = chat.Input.Parent
+            local cr = frame:FindFirstChildOfClass("UICorner")
+            if cr then cr.CornerRadius = UDim.new(0, 8) end
+            chat.Input.TextSize = 14
+            chat:_RefreshChannel()
+        end)
+    end
+    return chat
+end
+
+-- ---------- 9) settings: extra themes / presets + the toggle ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p70 then
+        tab._p70 = true
+        pcall(function()
+            local t = Lib.Options.__Theme
+            if t then t:SetValues({ "Dark", "Midnight", "Graphite", "Mocha", "Forest", "Light", "Discord", "Amoled", "Nord" }) end
+            local pr = Lib.Options.__Preset
+            if pr then pr:SetValues({ "Blue", "Teal", "Violet", "Rose", "Amber", "Red", "Green", "Mono", "Blurple" }) end
+        end)
+        pcall(function()
+            local look = Lib:LoadLook()
+            for _, sub in ipairs(tab.Subs) do
+                for _, g in ipairs(sub.Groupboxes) do
+                    if g.Name == "Appearance" and not g._p70 then
+                        g._p70 = true
+                        g:AddToggle("RoomyRows", { Text = "Roomy chat messages", Default = look.Rows, IgnoreConfig = true,
+                            Tooltip = "Larger avatars, row hover and mention stripe in the Discord message style.",
+                            Callback = function(v)
+                                look.Rows = v and true or false
+                                Lib:SaveLook()
+                                local c = Lib.ChatObj
+                                if c then pcall(function() c:_ReloadMessages() end) end
+                            end })
+                    end
+                end
+            end
+        end)
+    end
+    return tab
+end
+
+end
+-- ===================== end patch 7.0 =====================
+
+-- ===================== Aether patch 7.1 =====================
+-- Paste right above the final `return Lib` (after patch 7.0).
+do
+local P = {}
+Lib.Version = "7.1.0"
+P.MEM_W = 232
+P.NIcon = {
+    info = { "info", "Accent" }, success = { "circle-check", "Good" },
+    warn = { "triangle-alert", "Warn" }, error = { "circle-x", "Bad" },
+}
+
+-- ---------- 0) prefs (<Folder>/look71.json) ----------
+Lib.Look71 = { Members = true, Welcome = true, StatusBar = true, CompactW = 760 }
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/look71.json" end
+
+    function Lib:LoadLook71()
+        if loaded then return self.Look71 end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                local L = self.Look71
+                if type(d.members) == "boolean" then L.Members = d.members end
+                if type(d.welcome) == "boolean" then L.Welcome = d.welcome end
+                if type(d.status) == "boolean" then L.StatusBar = d.status end
+                if tonumber(d.cw) then L.CompactW = Clamp(tonumber(d.cw), 480, 1100) end
+            end)
+        end
+        return self.Look71
+    end
+
+    function Lib:SaveLook71()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.6, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                local L = Lib.Look71
+                writefile(Path(), HttpService:JSONEncode({ members = L.Members, welcome = L.Welcome, status = L.StatusBar, cw = L.CompactW }))
+            end)
+        end)
+    end
+end
+
+-- ---------- 1) the layout fix: Compact and Discord are different in fullscreen ----------
+function Chat:_CompactSides(on, w, cw)
+    local s = self._sides
+    if not on then
+        if s then s.l.Visible, s.r.Visible = false, false end
+        return
+    end
+    if not s then
+        s = {}
+        for _, k in ipairs({ "l", "r" }) do
+            s[k] = New("Frame", { Name = "CompactSide", BackgroundTransparency = 0, ZIndex = 0, Theme = { BackgroundColor3 = "Surface" }, Parent = self.Frame })
+        end
+        self._sides = s
+    end
+    local edge = math.max((w - cw) / 2, 0)
+    s.l.Position, s.l.Size = UDim2.fromOffset(0, 38), UDim2.new(0, edge, 1, -38)
+    s.r.AnchorPoint = Vector2.new(1, 0)
+    s.r.Position, s.r.Size = UDim2.new(1, 0, 0, 38), UDim2.new(0, edge, 1, -38)
+    s.l.Visible, s.r.Visible = true, true
+end
+
+function Chat:_FlatHeader()
+    local btn = self.ChBtn
+    if not (btn and btn.Parent) then return end
+    local flat = (self.Wide or self.Full) and true or false
+    btn.BackgroundTransparency = flat and 1 or 0
+    local st = btn:FindFirstChildOfClass("UIStroke")
+    if st then st.Enabled = not flat end
+    local lbl = self.ChLabel
+    if lbl then
+        lbl.Font = flat and Lib.FontBold or Lib.Font
+        lbl.TextSize = flat and 15 or 12
+    end
+    if self._hdrLine then self._hdrLine.Visible = flat end
+end
+
+function Chat:_SidebarLayout()
+    local sb = self._sb
+    if not sb then return end
+    local L = Lib:LoadLook71()
+    local discord = Lib:LoadChatState().layout ~= "Compact"
+    local w = self.Frame.Size.X.Offset
+    local wide = discord and w >= 440
+    local was, wasMem = self.Wide, self._memOn
+    self.Wide = wide
+    self.SBW = (wide and self.Full) and 248 or 150
+    local mem = (wide and self.Full and L.Members and w >= 900 and self._mem ~= nil) and true or false
+    self._memOn = mem
+    local SW = wide and self.SBW or 0
+    local MW = mem and P.MEM_W or 0
+    sb.card.Visible = wide
+    sb.card.Size = UDim2.new(0, self.SBW - 8, 1, -52)
+    if self._mem then self._mem.card.Visible = mem end
+
+    local compactFull = (not discord) and self.Full and true or false
+    local cw = 0
+    if compactFull then
+        cw = math.min(L.CompactW, math.max(w - 32, 320))
+        sb.main.AnchorPoint = Vector2.new(0.5, 0)
+        sb.main.Position = UDim2.new(0.5, 0, 0, 0)
+        sb.main.Size = UDim2.new(0, cw, 1, 0)
+    else
+        sb.main.AnchorPoint = Vector2.zero
+        sb.main.Position = UDim2.fromOffset(SW, 0)
+        sb.main.Size = UDim2.new(1, -(SW + MW), 1, 0)
+    end
+    pcall(self._CompactSides, self, compactFull, w, cw)
+
+    local btn = self.ChBtn
+    if btn and btn.Parent then
+        local ar = H(26) + 4
+        for _, c in ipairs(btn.Parent:GetChildren()) do
+            if c:IsA("TextButton") and c ~= btn then c.Visible = not wide end
+        end
+        btn.Position = wide and UDim2.fromOffset(0, 0) or UDim2.fromOffset(ar, 0)
+        btn.Size = wide and UDim2.fromScale(1, 1) or UDim2.new(1, -(ar * 2), 1, 0)
+    end
+
+    local mb, mbar = self._memBtn, self._memBar
+    if mb and mbar then
+        local show = wide and self.Full and true or false
+        mb.Button.Visible = show
+        mbar.region.Size = UDim2.new(1, -(mbar.bh * (show and 4 or 3) + (show and 24 or 20)), 1, 0)
+        mb.Rest = L.Members and "Accent" or "SubText"
+        Tint(mb.Icon, Lib.Theme[mb.Rest], 0.1)
+    end
+
+    pcall(self._FlatHeader, self)
+    if wide then self:_QueueSidebar() end
+    if was ~= wide then
+        for _, it in ipairs(self.Items) do pcall(self._ClampItem, self, it) end
+        pcall(function() self:_RefreshChannel() end)
+    end
+    if mem and not wasMem then
+        task.defer(function() pcall(self._RefreshMembers, self, true) end)
+    end
+end
+
+-- ---------- 2) member list panel ----------
+function Chat:_InitMembers()
+    if self._mem then return end
+    local card = New("Frame", { Name = "MemberPanel", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 44),
+        Size = UDim2.new(0, P.MEM_W - 8, 1, -52), BackgroundTransparency = 0, Visible = false, ZIndex = 2,
+        Theme = { BackgroundColor3 = "Surface" }, Parent = self.Frame })
+    Corner(card, 6)
+    local title = New("TextLabel", { Text = "", Font = Lib.FontBold, TextSize = 11, Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(10, 4),
+        TextXAlignment = LEFT, Theme = { TextColor3 = "Dim" }, Parent = card })
+    local list = New("ScrollingFrame", { Size = UDim2.new(1, -4, 1, -34), Position = UDim2.fromOffset(2, 32), AutomaticCanvasSize = Y,
+        ScrollBarThickness = 0, Parent = card })
+    List(list, 1)
+    Pad(list, 4, 0, 4, 6)
+    self._mem = { card = card, title = title, list = list, sig = "" }
+end
+
+function Chat:_MemberEntries()
+    local out, seen = {}, {}
+    local me = LocalPlayer.UserId
+    local ch = self.Channels[self.ChIndex]
+    local live = {}
+    for _, u in ipairs(self.Users or {}) do
+        local id = tonumber(u.uid)
+        if id then live[id] = u end
+    end
+    local function Add(sec, id, name, display)
+        id = tonumber(id)
+        if not id or seen[id] then return end
+        seen[id] = true
+        local nm = tostring(name or "")
+        local dn = tostring((display ~= nil and display ~= "") and display or nm)
+        if id == me then
+            local cn = Lib:LoadChatName()
+            nm = LocalPlayer.Name
+            dn = (cn ~= "") and cn or LocalPlayer.DisplayName
+        elseif dn == "" then
+            dn = self:_NameOf(id)
+        end
+        local on = live[id] ~= nil or id == me or (self.Friends and self.Friends.online[tostring(id)] == true)
+        local mode, text = self:_StatusOf(id)
+        if id == me and mode == "invisible" then on = false end
+        out[#out + 1] = { sec = sec or (on and 2 or 3), uid = id, name = (nm ~= "" and nm or dn), display = dn,
+            online = on, mode = mode, text = tostring(text or "") }
+    end
+    if ch and ch.kind == "dm" then
+        Add(nil, ch.uid, ch.name, ch.name)
+        Add(nil, me)
+    elseif ch and ch.kind == "grp" then
+        local owner = tonumber(ch.creator or ch.owner)
+        for _, m in ipairs(ch.members or {}) do
+            local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+            if id then
+                local nm = type(m) == "table" and m.name or nil
+                local dn = type(m) == "table" and m.display or nil
+                Add(id == owner and 1 or nil, id, nm, dn)
+            end
+        end
+    else
+        for _, u in ipairs(self.Users or {}) do
+            if #out >= 150 then break end
+            Add(nil, u.uid, u.name, u.display)
+        end
+        Add(nil, me)
+    end
+    table.sort(out, function(a, b)
+        if a.sec ~= b.sec then return a.sec < b.sec end
+        return a.display:lower() < b.display:lower()
+    end)
+    return out
+end
+
+function Chat:_MemberRow(parent, e, order)
+    local u = { uid = e.uid, name = e.name, display = e.display }
+    local sub = e.text ~= "" and e.text or nil
+    local b = New("TextButton", { Name = "MemRow", Text = "", Size = UDim2.new(1, 0, 0, H(40)), LayoutOrder = order, BackgroundTransparency = 1,
+        Theme = { BackgroundColor3 = "FieldHover" }, Parent = parent })
+    Corner(b, 6)
+    local av = New("ImageLabel", { Size = UDim2.fromOffset(32, 32), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0),
+        BackgroundTransparency = 0, ScaleType = Enum.ScaleType.Crop, ImageTransparency = e.online and 0 or 0.55,
+        Theme = { BackgroundColor3 = "Field" }, Parent = b })
+    Corner(av, 16)
+    GetAvatar(e.uid, function(url) if av.Parent then av.Image = url end end)
+    local dot = New("Frame", { Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 3, 1, 3), ZIndex = 3,
+        BackgroundColor3 = e.online and Lib:StatusColor(e.mode or "online") or Lib.Theme.Dim, Parent = av })
+    Corner(dot, 6) Stroke(dot, "Surface", 2, 0)
+    New("TextLabel", { Text = e.display, Font = Lib.FontBold, TextSize = 13, Size = UDim2.new(1, -56, 0, 16), Position = UDim2.fromOffset(48, sub and 5 or 12),
+        TextXAlignment = LEFT, TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = e.online and "Text" or "Dim" }, Parent = b })
+    if sub then
+        New("TextLabel", { Text = sub, TextSize = 11, Size = UDim2.new(1, -56, 0, 14), Position = UDim2.fromOffset(48, 21), TextXAlignment = LEFT,
+            TextTruncate = Enum.TextTruncate.AtEnd, Theme = { TextColor3 = "SubText" }, Parent = b })
+    end
+    b.MouseEnter:Connect(function() Tween(b, { BackgroundTransparency = 0.5 }, 0.06) end)
+    b.MouseLeave:Connect(function() Tween(b, { BackgroundTransparency = 1 }, 0.08) end)
+    b.Activated:Connect(function() self:ShowProfile(u) end)
+    b.MouseButton2Click:Connect(function()
+        self.LastPtr = UIS:GetMouseLocation() + Lib.PtrShift
+        self:UserMenu(u, b)
+    end)
+end
+
+function Chat:_RefreshMembers(force)
+    local m = self._mem
+    if not (m and self._memOn and m.card.Parent) then return end
+    local ents = self:_MemberEntries()
+    local parts = {}
+    for _, e in ipairs(ents) do
+        parts[#parts + 1] = e.sec .. ":" .. e.uid .. ":" .. (e.online and 1 or 0) .. ":" .. tostring(e.mode or "") .. ":" .. e.text .. ":" .. e.display
+    end
+    local sig = tostring(self.Room) .. "|" .. table.concat(parts, ",")
+    if sig == m.sig and not force then return end
+    m.sig = sig
+    for _, c in ipairs(m.list:GetChildren()) do
+        if c:IsA("GuiObject") then c:Destroy() end
+    end
+    local counts = { 0, 0, 0 }
+    for _, e in ipairs(ents) do counts[e.sec] = counts[e.sec] + 1 end
+    local ch = self.Channels[self.ChIndex]
+    m.title.Text = ((ch and ch.kind == "grp") and "MEMBERS" or "PEOPLE") .. " — " .. #ents
+    local HEAD = { "OWNER", "ONLINE", "OFFLINE" }
+    local order, last = 0, 0
+    for _, e in ipairs(ents) do
+        if e.sec ~= last then
+            last = e.sec
+            order = order + 1
+            local h = New("TextLabel", { Text = HEAD[e.sec] .. " — " .. counts[e.sec], Font = Lib.FontBold, TextSize = 10, Size = UDim2.new(1, 0, 0, 24),
+                LayoutOrder = order, TextXAlignment = LEFT, Theme = { TextColor3 = "Dim" }, Parent = m.list })
+            Pad(h, 8, 8, 0, 0)
+        end
+        order = order + 1
+        self:_MemberRow(m.list, e, order)
+    end
+end
+
+-- ---------- 3) header: topic segment, divider, members button ----------
+function Chat:_PaintTopic()
+    local lbl, base = self.ChLabel, self._topicBase
+    if not (lbl and base) then return end
+    if not (self.Wide or self.Full) then lbl.Text = base return end
+    local ch = self.Channels[self.ChIndex]
+    if not ch then return end
+    local t
+    if ch.kind == "dm" then
+        local _, x = nil, nil
+        if ch.uid then _, x = self:_StatusOf(ch.uid) end
+        t = (x and x ~= "") and x or "Direct message"
+    elseif ch.kind == "grp" then
+        local n = #(ch.members or {})
+        t = n > 0 and (n .. (n == 1 and " member" or " members")) or "Group chat"
+    else
+        t = (self.Online or 0) .. " online"
+    end
+    lbl.Text = base .. "  <font color='#" .. Hex("Dim") .. "'>│  " .. RichEsc(t) .. "</font>"
+end
+
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+    P.RefreshChannel(self)
+    pcall(function()
+        if self.ChLabel then self._topicBase = self.ChLabel.Text end
+        self:_FlatHeader()
+        self:_PaintTopic()
+        self:_PaintWelcome()
+    end)
+end
+
+function Chat:_P71HeaderInit()
+    if self._hdr71 then return end
+    local region = self.ChBtn and self.ChBtn.Parent
+    local bar = region and region.Parent
+    local main = self._sb and self._sb.main
+    if not (bar and main) then return end
+    self._hdr71 = true
+    local bh = H(26)
+    self._hdrLine = New("Frame", { Name = "HdrLine", Size = UDim2.new(1, -16, 0, 1), Position = UDim2.fromOffset(8, 44 + bh + 3),
+        BackgroundTransparency = 0.6, Visible = false, Theme = { BackgroundColor3 = "Stroke" }, Parent = main })
+    local api = IconButton(bar, "users-round", "M", bh, "Member list", "Accent", 0)
+    api.Button.AnchorPoint = Vector2.new(1, 0)
+    api.Button.Position = UDim2.new(1, -(bh * 3 + 12), 0, 0)
+    api.Button.Visible = false
+    api.Button.Activated:Connect(function()
+        local L = Lib:LoadLook71()
+        L.Members = not L.Members
+        Lib:SaveLook71()
+        pcall(function() local t = Lib.Toggles.ChatMembers if t then t:SetValue(L.Members, true) end end)
+        self:_SidebarLayout()
+        pcall(self._RefreshMembers, self, true)
+    end)
+    self._memBtn, self._memBar = api, { region = region, bh = bh }
+    task.spawn(function()
+        while not Lib.Unloaded and self.Frame and self.Frame.Parent do
+            task.wait(2.5)
+            if self.Frame.Visible then
+                pcall(self._PaintTopic, self)
+                if self._memOn then pcall(self._RefreshMembers, self) end
+            end
+        end
+    end)
+end
+
+-- ---------- 4) welcome header at the top of the history ----------
+function Chat:_P71Welcome()
+    if self._wel then return end
+    local f = New("Frame", { Name = "Welcome71", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, LayoutOrder = -1000000, BackgroundTransparency = 1, Parent = self.List })
+    Pad(f, 10, 16, 10, 8)
+    List(f, 6)
+    local ico = New("Frame", { Size = UDim2.fromOffset(64, 64), LayoutOrder = 1, BackgroundTransparency = 0, Theme = { BackgroundColor3 = "Field" }, Parent = f })
+    Corner(ico, 32)
+    local glyph = New("TextLabel", { Text = "#", Font = Lib.FontBold, TextSize = 30, Size = UDim2.fromScale(1, 1), Theme = { TextColor3 = "Text" }, Parent = ico })
+    local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, Visible = false, Parent = ico })
+    Corner(img, 32)
+    local title = New("TextLabel", { Text = "", Font = Lib.FontBold, TextSize = 24, Size = UDim2.new(1, 0, 0, 30), TextXAlignment = LEFT,
+        TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = 2, Parent = f })
+    local desc = New("TextLabel", { Text = "", TextSize = 13, Size = UDim2.new(1, 0, 0, 16), TextXAlignment = LEFT, TextYAlignment = Enum.TextYAlignment.Top,
+        LayoutOrder = 3, Theme = { TextColor3 = "SubText" }, Parent = f })
+    Wrap(desc, nil, nil, 16)
+    New("Frame", { Size = UDim2.new(1, 0, 0, 1), LayoutOrder = 4, BackgroundTransparency = 0.5, Theme = { BackgroundColor3 = "Stroke" }, Parent = f })
+    self._wel = { f = f, glyph = glyph, img = img, title = title, desc = desc, key = nil }
+    self:_PaintWelcome()
+end
+
+function Chat:_PaintWelcome()
+    local w = self._wel
+    if not w then return end
+    local ch = self.Channels[self.ChIndex]
+    local trimmed = #self.Items >= (tonumber(self.Config.MaxMessages) or 100)
+    w.f.Visible = (Lib:LoadLook71().Welcome ~= false) and ch ~= nil and not trimmed
+    if not (ch and w.f.Visible) then return end
+    local key = ch.room .. "|" .. tostring(ch.name)
+    if w.key == key then return end
+    w.key = key
+    local name = tostring(ch.name or "?")
+    w.img.Visible, w.glyph.Visible = false, true
+    if ch.kind == "dm" then
+        w.glyph.Text = "@"
+        w.title.Text = name
+        w.desc.Text = "This is the beginning of your direct message history with @" .. name .. ". Only the two of you can see these messages."
+        if ch.uid then
+            GetAvatar(ch.uid, function(u)
+                if w.img.Parent and w.key == key then w.img.Image, w.img.Visible, w.glyph.Visible = u, true, false end
+            end)
+        end
+    elseif ch.kind == "grp" then
+        w.glyph.Text = "«"
+        w.title.Text = name
+        w.desc.Text = "This is the start of «" .. name .. "». Up to " .. MAX_GROUP .. " people can be in a group chat."
+    else
+        w.glyph.Text = "#"
+        w.title.Text = "Welcome to #" .. name .. "!"
+        w.desc.Text = "This is the start of the #" .. name .. " channel. Say hi!"
+    end
+end
+
+-- ---------- 5) owner badge + welcome refresh on new messages ----------
+function Chat:_P71Badge(item, msg)
+    local ch = self.Channels[self.ChIndex]
+    if not (ch and ch.kind == "grp") then return end
+    local owner = tonumber(ch.creator or ch.owner)
+    if not owner or tonumber(msg.uid) ~= owner then return end
+    local col = item:FindFirstChild("Col")
+    local head = col and col:FindFirstChildOfClass("TextLabel")
+    if not (head and head.RichText and head.Name ~= "SeenLbl") then return end
+    if head.Text:find("OWNER", 1, true) then return end
+    local badge = "<font color='#" .. Hex("Warn") .. "' size='10'><b>OWNER</b></font>"
+    local t, n = head.Text:gsub("</b>", "</b>  " .. badge, 1)
+    head.Text = n > 0 and t or (head.Text .. "  " .. badge)
+end
+
+P.AddMessage = Chat.AddMessage
+function Chat:AddMessage(msg)
+    local last = self.Items[#self.Items]
+    local res = P.AddMessage(self, msg)
+    pcall(self._PaintWelcome, self)
+    local item = self.Items[#self.Items]
+    local meta = item and item ~= last and self.Meta[item]
+    if meta and meta.msg == msg and not meta.isCard then
+        pcall(self._P71Badge, self, item, msg)
+    end
+    return res
+end
+
+-- ---------- 6) composer: + on the left, emoji button on the right ----------
+function Chat:_P71Composer()
+    if self._cmp71 then return end
+    local input = self.Input
+    local frame = input and input.Parent
+    if not (frame and frame.Parent) then return end
+    local ih = H(32)
+    local plus
+    for _, c in ipairs(frame:GetChildren()) do
+        if c:IsA("TextButton") and c.Position.X.Scale == 1 and c.Position.X.Offset == -ih * 2 then plus = c end
+    end
+    if not plus then
+        warn("[Aether] composer: + button not found, composer left unchanged")
+        return
+    end
+    self._cmp71 = true
+    local LP = ih - 2
+    plus.AnchorPoint = Vector2.new(0, 1)
+    plus.Position = UDim2.new(0, 4, 1, -4)
+    local emoji = IconButton(frame, "smile", ":)", ih - 8, "Emoji", "Accent", 1)
+    emoji.Button.AnchorPoint = Vector2.new(1, 1)
+    emoji.Button.Position = UDim2.new(1, -ih * 2, 1, -4)
+    emoji.Button.Activated:Connect(function()
+        self:EmojiPicker(function(e)
+            input.Text = input.Text .. e
+            task.defer(function() input:CaptureFocus() end)
+        end, "Add emoji")
+    end)
+    -- the 6.7 auto-grow code rewrites Position/Size on every resize, so the offsets are re-applied after it
+    local guard = false
+    local function Lock()
+        if guard then return end
+        local p, s = input.Position, input.Size
+        local wantX, wantW = 10 + LP, -(ih * 3 + 14) - LP
+        if p.X.Offset ~= wantX or s.X.Offset ~= wantW then
+            guard = true
+            input.Position = UDim2.new(p.X.Scale, wantX, p.Y.Scale, p.Y.Offset)
+            input.Size = UDim2.new(s.X.Scale, wantW, s.Y.Scale, s.Y.Offset)
+            guard = false
+        end
+    end
+    input:GetPropertyChangedSignal("Position"):Connect(Lock)
+    input:GetPropertyChangedSignal("Size"):Connect(Lock)
+    Lock()
+end
+
+-- ---------- 7) chevron menu: layout switch + member list ----------
+P.PopMenu = Chat._PopMenu
+function Chat:_PopMenu(spec, anchor)
+    if anchor ~= nil and anchor == self.ChBtn and spec.Name ~= "Notifications" and spec.Sections and spec.Sections[2] then
+        local S = Lib:LoadChatState()
+        local toCompact = S.layout ~= "Compact"
+        table.insert(spec.Sections[2], { Text = toCompact and "Switch to Compact Layout" or "Switch to Discord Layout", Icon = "layout-panel-left", Cb = function()
+            S.layout = toCompact and "Compact" or "Discord"
+            Lib:SaveChatState()
+            local o = Lib.Options.ChatLayout
+            if o then o:SetValue(S.layout, true) end
+            self:_ApplyLayout()
+        end })
+        if self.Full and self.Wide then
+            local L = Lib:LoadLook71()
+            table.insert(spec.Sections[2], { Text = "Member List", Icon = "users-round", Hint = L.Members and "On" or "Off", Cb = function()
+                L.Members = not L.Members
+                Lib:SaveLook71()
+                self:_SidebarLayout()
+            end })
+        end
+    end
+    return P.PopMenu(self, spec, anchor)
+end
+
+-- ---------- 8) toasts get a type icon ----------
+P.Notify = Lib.Notify
+function Lib:Notify(a, b, c)
+    local hold = self.Overlay and self.Overlay:FindFirstChild("Notifications")
+    local before = {}
+    if hold then for _, k in ipairs(hold:GetChildren()) do before[k] = true end end
+    local r = P.Notify(self, a, b, c)
+    pcall(function()
+        hold = self.Overlay:FindFirstChild("Notifications")
+        if not hold then return end
+        local kind = (type(a) == "table" and a.Type) or c or "info"
+        local def = P.NIcon[kind] or P.NIcon.info
+        for _, wrap in ipairs(hold:GetChildren()) do
+            if wrap:IsA("Frame") and not before[wrap] then
+                local card
+                for _, k in ipairs(wrap:GetChildren()) do
+                    if k:IsA("Frame") then card = k break end
+                end
+                local content
+                if card then
+                    for _, k in ipairs(card:GetChildren()) do
+                        if k:IsA("Frame") and k.AutomaticSize == Y then content = k break end
+                    end
+                end
+                if content and not card:FindFirstChild("TypeTile") then
+                    content.Position = UDim2.fromOffset(46, 9)
+                    content.Size = UDim2.new(1, -60, 0, 0)
+                    local tile = New("Frame", { Name = "TypeTile", Size = UDim2.fromOffset(24, 24), Position = UDim2.fromOffset(15, 7),
+                        BackgroundTransparency = 0.82, Theme = { BackgroundColor3 = def[2] }, Parent = card })
+                    Corner(tile, 12)
+                    Lib.Icon(def[1], 14, def[2], { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Parent = tile })
+                end
+            end
+        end
+    end)
+    return r
+end
+
+-- ---------- 9) main window: status bar + Ctrl F chip ----------
+function Window:_P71Status()
+    if self._st71 or not (self.Main and self.Main.Parent) then return end
+    local bar = New("Frame", { Name = "StatusBar", Size = UDim2.new(1, -(self.SW + 1), 0, 22), AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, self.SW + 1, 1, 0), BackgroundTransparency = 1, ZIndex = 8, Parent = self.Main })
+    New("Frame", { Size = UDim2.new(1, -24, 0, 1), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 0.6, ZIndex = 8,
+        Theme = { BackgroundColor3 = "Stroke" }, Parent = bar })
+    local left = New("TextLabel", { RichText = true, Text = "", TextSize = 11, Size = UDim2.new(0.6, -12, 1, 0), Position = UDim2.fromOffset(14, 0),
+        TextXAlignment = LEFT, ZIndex = 9, Theme = { TextColor3 = "Dim" }, Parent = bar })
+    local right = New("TextLabel", { RichText = true, Text = "", TextSize = 11, Size = UDim2.new(0.4, -30, 1, 0), AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -26, 0, 0), TextXAlignment = RIGHT, ZIndex = 9, Theme = { TextColor3 = "Dim" }, Parent = bar })
+    self._st71 = { bar = bar, left = left, right = right }
+    self:_UpdateSubBar()
+end
+
+-- Pages give up 22px at the bottom for the bar (the original code re-sets Pages.Size, so this is applied after it)
+P.UpdateSubBar = Window._UpdateSubBar
+function Window:_UpdateSubBar()
+    P.UpdateSubBar(self)
+    if self._st71 and self.Pages and Lib:LoadLook71().StatusBar ~= false then
+        local s = self.Pages.Size
+        self.Pages.Size = UDim2.new(s.X.Scale, s.X.Offset, s.Y.Scale, s.Y.Offset - 22)
+    end
+end
+
+function Window:_P71SearchChip()
+    local box = self.SearchBox
+    local field = box and box.Parent
+    if not field or Lib.Touch then return end
+    local chip = New("TextLabel", { Name = "KbdChip", Text = "Ctrl F", Font = Lib.FontBold, TextSize = 10, Size = UDim2.fromOffset(36, 16),
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0), BackgroundTransparency = 0, ZIndex = 3,
+        Theme = { BackgroundColor3 = "FieldHover", TextColor3 = "Dim" }, Parent = field })
+    Corner(chip, 4)
+    local function Paint() chip.Visible = box.Text == "" and not box:IsFocused() and field.AbsoluteSize.X >= 150 end
+    box:GetPropertyChangedSignal("Text"):Connect(Paint)
+    box.Focused:Connect(Paint)
+    box.FocusLost:Connect(Paint)
+    field:GetPropertyChangedSignal("AbsoluteSize"):Connect(Paint)
+    Paint()
+end
+
+do
+    local acc = 0
+    Lib:Connect(RunService.Heartbeat, function(dt)
+        acc = acc + dt
+        if acc < 0.5 then return end
+        acc = 0
+        local w = Lib.MainWindow
+        local s = w and w._st71
+        if not (s and s.bar.Parent) then return end
+        local on = Lib:LoadLook71().StatusBar ~= false and not w.Minimized
+        if s.bar.Visible ~= on then s.bar.Visible = on end
+        if not on then return end
+        local fps, ping = Lib.FPS, Lib:GetPing()
+        local fc = fps >= 50 and "Good" or (fps >= 30 and "Warn" or "Bad")
+        local pc = ping <= 80 and "Good" or (ping <= 160 and "Warn" or "Bad")
+        s.left.Text = "<font color='#" .. Hex(fc) .. "'>●</font> " .. fps .. " fps    <font color='#" .. Hex(pc) .. "'>●</font> " .. ping .. " ms    " .. Clock(os.clock() - Lib.StartTime)
+        s.right.Text = "Ctrl F search    ·    " .. KeyName(Lib.ToggleKey) .. " hide"
+    end)
+end
+
+P.CreateWindow = Lib.CreateWindow
+function Lib:CreateWindow(cfg)
+    local win = P.CreateWindow(self, cfg)
+    pcall(function() win:_P71Status() end)
+    pcall(function() win:_P71SearchChip() end)
+    return win
+end
+
+-- ---------- 10) settings group ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p71 then
+        tab._p71 = true
+        pcall(function()
+            local L = Lib:LoadLook71()
+            local sub
+            for _, s in ipairs(tab.Subs) do
+                if s.Name == "Interface" then sub = s end
+            end
+            if not sub then return end
+            local gb = sub:AddLeftGroupbox("Chat look", { Icon = "message-square", Collapsible = true })
+            gb:AddToggle("ChatMembers", { Text = "Member list (fullscreen)", Default = L.Members, IgnoreConfig = true,
+                Tooltip = "Discord layout, fullscreen only: shows who is in the chat on the right.",
+                Callback = function(v)
+                    L.Members = v and true or false
+                    Lib:SaveLook71()
+                    local c = Lib.ChatObj
+                    if c then pcall(function() c:_SidebarLayout() c:_RefreshMembers(true) end) end
+                end })
+            gb:AddToggle("ChatWelcome", { Text = "Welcome header", Default = L.Welcome, IgnoreConfig = true,
+                Callback = function(v)
+                    L.Welcome = v and true or false
+                    Lib:SaveLook71()
+                    local c = Lib.ChatObj
+                    if c and c._wel then c._wel.key = nil pcall(c._PaintWelcome, c) end
+                end })
+            gb:AddSlider("ChatCompactW", { Text = "Compact fullscreen width", Min = 480, Max = 1100, Default = L.CompactW, Rounding = 0, Suffix = "px", IgnoreConfig = true,
+                Callback = function(v)
+                    L.CompactW = v
+                    Lib:SaveLook71()
+                    local c = Lib.ChatObj
+                    if c then pcall(c._SidebarLayout, c) end
+                end })
+            gb:AddToggle("StatusBarOn", { Text = "Status bar (main window)", Default = L.StatusBar, IgnoreConfig = true,
+                Callback = function(v)
+                    L.StatusBar = v and true or false
+                    Lib:SaveLook71()
+                    local w = Lib.MainWindow
+                    if w then
+                        pcall(w._UpdateSubBar, w)
+                        if w._st71 then w._st71.bar.Visible = L.StatusBar and not w.Minimized end
+                    end
+                end })
+        end)
+    end
+    return tab
+end
+
+-- ---------- 11) hook ----------
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p71 then
+        chat._p71 = true
+        Lib:LoadLook71()
+        local function Try(n, fn)
+            local ok, e = pcall(fn)
+            if not ok then warn("[Aether] " .. n .. ": " .. tostring(e)) end
+        end
+        Try("composer", function() chat:_P71Composer() end)
+        Try("members", function() chat:_InitMembers() end)
+        Try("welcome", function() chat:_P71Welcome() end)
+        Try("header", function() chat:_P71HeaderInit() end)
+        Try("layout", function() chat:_SidebarLayout() chat:_RefreshChannel() end)
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 7.1 =====================
+
+-- ===================== Aether patch 7.2 =====================
+-- Paste right above the final `return Lib` (after patch 7.1).
+do
+local P = {}
+Lib.Version = "7.2.0"
+local MEMW = 232 -- same width the 7.1 member panel uses
+
+-- ---------- 0) prefs (<Folder>/look72.json) ----------
+Lib.Look72 = { Win = false, Offline = true }
+do
+    local loaded, tick = false, 0
+    local function Path() return Lib.ConfigFolder .. "/look72.json" end
+
+    function Lib:LoadLook72()
+        if loaded then return self.Look72 end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = Path()
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                if type(d.win) == "boolean" then self.Look72.Win = d.win end
+                if type(d.offline) == "boolean" then self.Look72.Offline = d.offline end
+            end)
+        end
+        return self.Look72
+    end
+
+    function Lib:SaveLook72()
+        if not FsOk() then return end
+        tick = tick + 1
+        local t = tick
+        task.delay(0.6, function()
+            if t ~= tick then return end
+            pcall(function()
+                if not isfolder(Lib.ConfigFolder) then makefolder(Lib.ConfigFolder) end
+                local L = Lib.Look72
+                writefile(Path(), HttpService:JSONEncode({ win = L.Win, offline = L.Offline }))
+            end)
+        end)
+    end
+end
+
+-- ---------- 1) everyone list (online + offline) from the relay ----------
+function Chat:_KickAllUsers(force)
+    if not (self.Request and self.Config.Url) or self.Blocked then return end
+    local now = os.clock()
+    if self._auBusy then return end
+    if not force and now - (self._auAt or -1e9) < 45 then return end
+    self._auBusy, self._auAt = true, now
+    task.spawn(function()
+        local list, off, total = {}, 0, 0
+        for _ = 1, 5 do
+            local d = Decode(self:_Do("/users", { q = "", scope = "all", offset = off, limit = 30 }))
+            if not (d and d.ok) then break end
+            local us = d.users or {}
+            for _, u in ipairs(us) do list[#list + 1] = u end
+            off = off + #us
+            total = tonumber(d.total) or off
+            if #us == 0 or off >= total then break end
+            task.wait(0.25)
+        end
+        self._auBusy = false
+        if #list > 0 then
+            self._allUsers, self._auTotal = list, total
+            if self._memOn then pcall(self._RefreshMembers, self, true) end
+        end
+    end)
+end
+
+-- ---------- 2) member entries: add offline people on public channels ----------
+local function SortEntries(out)
+    table.sort(out, function(a, b)
+        if a.sec ~= b.sec then return a.sec < b.sec end
+        return a.display:lower() < b.display:lower()
+    end)
+end
+
+P.MemberEntries = Chat._MemberEntries
+function Chat:_MemberEntries()
+    local out = P.MemberEntries(self)
+    pcall(function()
+        local L = Lib:LoadLook72()
+        local ch = self.Channels[self.ChIndex]
+        if ch and ch.kind == nil and L.Offline then
+            local seen = {}
+            for _, e in ipairs(out) do seen[e.uid] = true end
+            for _, u in ipairs(self._allUsers or {}) do
+                local id = tonumber(u.uid)
+                if id and not seen[id] and #out < 300 then
+                    seen[id] = true
+                    local nm = tostring(u.name or "")
+                    local dn = tostring((u.display ~= nil and u.display ~= "") and u.display or nm)
+                    local on = u.online == true
+                    out[#out + 1] = { sec = on and 2 or 3, uid = id, name = (nm ~= "" and nm or dn), display = dn,
+                        online = on, mode = nil, text = "" }
+                end
+            end
+            self:_KickAllUsers()
+        end
+        for _, e in ipairs(out) do
+            if not e.online and e.text == "" then
+                local f = self.Friends and self.Friends.byId[tostring(e.uid)]
+                local s = f and tonumber(f.seen)
+                if s and s > 0 then e.text = "Last seen " .. Ago(s) end
+            end
+        end
+        SortEntries(out)
+    end)
+    return out
+end
+
+-- "Browse all N people" row under the list
+P.RefreshMembers = Chat._RefreshMembers
+function Chat:_RefreshMembers(force)
+    P.RefreshMembers(self, force)
+    pcall(function()
+        local m = self._mem
+        if not (m and self._memOn and m.list.Parent) then return end
+        local ch = self.Channels[self.ChIndex]
+        local foot = m.list:FindFirstChild("AllFoot")
+        local total = self._auTotal or 0
+        local shown = 0
+        for _, c in ipairs(m.list:GetChildren()) do
+            if c.Name == "MemRow" then shown = shown + 1 end
+        end
+        local want = ch ~= nil and ch.kind == nil and Lib:LoadLook72().Offline and total > shown
+        if not want then
+            if foot then foot:Destroy() end
+            return
+        end
+        if not foot then
+            foot = New("TextButton", { Name = "AllFoot", Text = "", Size = UDim2.new(1, 0, 0, H(28)), LayoutOrder = 1000000,
+                BackgroundTransparency = 1, Theme = { TextColor3 = "Accent" }, Parent = m.list })
+            foot.TextSize = 12
+            foot.Activated:Connect(function() self:ShowUsers() end)
+        end
+        foot.Text = "Browse all " .. total .. " people  ›"
+    end)
+end
+
+-- ---------- 3) people popup opens on Everyone (online + offline) ----------
+function Chat:ShowUsers(pick)
+    local isPick = type(pick) == "table" and type(pick.Callback) == "function"
+    local w, h, sc = 300, H(440), Lib.Scale
+    local frame = Sink(New("Frame", { Size = UDim2.fromOffset(w, h), BackgroundTransparency = 0, ZIndex = 85,
+        Theme = { BackgroundColor3 = "Surface" }, Parent = Lib.Overlay }))
+    Corner(frame, 6) Stroke(frame, "Stroke", 1, 0)
+    New("UIScale", { Scale = sc, Parent = frame })
+    local total, online = self._auTotal, self.Online or 0
+    local title = isPick and (pick.Title or "Pick someone")
+        or ("People · " .. tostring(online) .. " online" .. ((total and total > online) and (" · " .. total .. " total") or ""))
+    New("TextLabel", { Text = title, Font = Lib.FontBold, TextSize = 12, Size = UDim2.new(1, -16, 0, 24), Position = UDim2.fromOffset(10, 4),
+        TextXAlignment = LEFT, ZIndex = 86, Parent = frame })
+    self:PeopleBrowser({ Parent = frame, Position = UDim2.fromOffset(8, 30), Size = UDim2.new(1, -16, 1, -38), Z = 86,
+        Scopes = { { "all", "Everyone" }, { "online", "Online" }, { "friends", "Friends" } },
+        Scope = (isPick and #self.Friends.friends > 0) and "friends" or "all",
+        OnClick = function(u)
+            Lib:ClosePopup()
+            if isPick then Safe(pick.Callback, u) else self:ShowProfile(u) end
+        end })
+    local pos, hh = PlaceBelow(self.Pill, w * sc, h * sc, 6, true)
+    frame.Position = UDim2.fromOffset(pos.X, pos.Y)
+    frame.Size = UDim2.fromOffset(w, hh / sc)
+    Lib:OpenPopup(frame, function() frame:Destroy() end, self.Pill)
+end
+
+-- pill: "3 online · 24 total"
+P.SetStatus = Chat.SetStatus
+function Chat:SetStatus(state, text)
+    local total = self._auTotal
+    if state == "Connected" and type(text) == "string" and total and total > (self.Online or 0) and Lib:LoadLook72().Offline then
+        text = text .. " · " .. total .. " total"
+    end
+    return P.SetStatus(self, state, text)
+end
+
+-- ---------- 4) member list inside the windowed chat ----------
+P.ApplyLayout = Chat._ApplyLayout
+function Chat:_ApplyLayout()
+    P.ApplyLayout(self)
+    if self.Full then return end
+    local discord = Lib:LoadChatState().layout ~= "Compact"
+    if not (discord and Lib:LoadLook72().Win) then return end
+    local panel, frame = self.PanelObj, self.Frame
+    panel.W = 540 + MEMW
+    if panel.Moved then
+        local vp, s = GetViewport(), Lib.Scale
+        frame.Size = UDim2.fromOffset(math.min(panel.W, (vp.X - 8) / s), frame.Size.Y.Offset)
+    else
+        Lib:_Place(panel)
+    end
+    self:_SidebarLayout()
+end
+
+P.SidebarLayout = Chat._SidebarLayout
+function Chat:_SidebarLayout()
+    P.SidebarLayout(self)
+    pcall(function()
+        local sb = self._sb
+        if not sb then return end
+        local windowed = self.Wide and not self.Full
+        local win = windowed and Lib:LoadLook72().Win and self._mem ~= nil
+        if self._peopleBtn then
+            self._peopleBtn.Button.Visible = windowed and true or false
+            self._peopleBtn.Rest = win and "Accent" or "SubText"
+            Tint(self._peopleBtn.Icon, Lib.Theme[self._peopleBtn.Rest], 0.1)
+        end
+        local mbar = self._memBar
+        if windowed and mbar then
+            mbar.region.Size = UDim2.new(1, -(mbar.bh * 4 + 24), 1, 0)
+        end
+        if win then
+            self._memOn = true
+            self._mem.card.Visible = true
+            sb.main.Size = UDim2.new(1, -(self.SBW + MEMW), 1, 0)
+            if not self._winMemWas then
+                task.defer(function()
+                    pcall(self._KickAllUsers, self, true)
+                    pcall(self._RefreshMembers, self, true)
+                end)
+            end
+        end
+        self._winMemWas = win and true or false
+    end)
+end
+
+function Chat:_P72Init()
+    if self._p72i then return end
+    local bar = self._memBar
+    if not bar then
+        warn("[Aether] 7.2: member bar missing (is patch 7.1 above this one?)")
+        return
+    end
+    self._p72i = true
+    local bh = bar.bh
+    local api = IconButton(bar.region.Parent, "users-round", "P", bh, "People (online + offline)", "Accent", 0)
+    api.Button.AnchorPoint = Vector2.new(1, 0)
+    api.Button.Position = UDim2.new(1, -(bh * 3 + 12), 0, 0)
+    api.Button.Visible = false
+    api.Button.Activated:Connect(function()
+        local L = Lib:LoadLook72()
+        L.Win = not L.Win
+        Lib:SaveLook72()
+        pcall(function() local t = Lib.Toggles.ChatPeopleWin if t then t:SetValue(L.Win, true) end end)
+        self:_ApplyLayout()
+        self:_SidebarLayout()
+        if L.Win then pcall(self._KickAllUsers, self, true) end
+        pcall(self._RefreshMembers, self, true)
+    end)
+    self._peopleBtn = api
+end
+
+-- ---------- 5) Do Not Disturb on the user panel ----------
+function Chat:_P72UserBell()
+    local u = self._up
+    local up = u and u.name and u.name.Parent
+    if not up or self._bell72 then return end
+    self._bell72 = true
+    local sz = H(24)
+    local api = IconButton(up, "bell", "!", sz, "Do Not Disturb", "Accent", 1)
+    api.Button.AnchorPoint = Vector2.new(1, 0.5)
+    api.Button.Position = UDim2.new(1, -(4 + sz + 2), 0.5, 0)
+    api.Button.ZIndex = 3
+    local off = Lib.Icon("bell-off", 14, "Bad", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        ZIndex = 4, Visible = false, Parent = api.Button }, "x")
+    u.name.Size = UDim2.new(1, -100, 0, 16)
+    u.sub.Size = UDim2.new(1, -100, 0, 14)
+    local function Paint()
+        local dnd = Lib:LoadStatus().mode == "dnd"
+        api.Icon.Visible = not dnd
+        off.Visible = dnd
+    end
+    self._bellPaint = Paint
+    Paint()
+    api.Button.Activated:Connect(function()
+        local dnd = Lib:LoadStatus().mode == "dnd"
+        Lib:SetStatusMode(dnd and "online" or "dnd")
+        Lib:Notify({ Title = "Do Not Disturb", Text = dnd and "Popups are back on." or "Mention, DM and friend popups are muted.",
+            Type = "success", Duration = 2.5 })
+    end)
+end
+
+P.StatusChanged = Lib._StatusChanged
+function Lib:_StatusChanged()
+    P.StatusChanged(self)
+    local c = self.ChatObj
+    if c and c._bellPaint then pcall(c._bellPaint) end
+end
+
+-- ---------- 6) Alt + Up / Down switches conversation ----------
+Lib:Connect(UIS.InputBegan, function(i)
+    local d = (i.KeyCode == Enum.KeyCode.Up and -1) or (i.KeyCode == Enum.KeyCode.Down and 1) or nil
+    if not d then return end
+    if not (UIS:IsKeyDown(Enum.KeyCode.LeftAlt) or UIS:IsKeyDown(Enum.KeyCode.RightAlt)) then return end
+    local c = Lib.ChatObj
+    if not (c and c.PanelObj and c.PanelObj._shown and #c.Channels > 1) then return end
+    if not (IsOver(c.Frame) or c.Input:IsFocused()) then return end
+    c:SetChannel((c.ChIndex - 1 + d) % #c.Channels + 1)
+end)
+
+-- ---------- 7) mention chips ----------
+P.Rich = Chat._Rich
+function Chat:_Rich(text, meta)
+    local s = P.Rich(self, text, meta)
+    s = s:gsub("(<font color='#(%x+)'><b>@[%w_]+</b></font>)", "<mark color='#%2' transparency='0.82'>%1</mark>")
+    return s
+end
+
+-- ---------- 8) settings ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    if tab and not tab._p72 then
+        tab._p72 = true
+        pcall(function()
+            local L = Lib:LoadLook72()
+            local gb
+            for _, s in ipairs(tab.Subs) do
+                for _, g in ipairs(s.Groupboxes) do
+                    if g.Name == "Chat look" then gb = g end
+                end
+            end
+            if not gb then return end
+            gb:AddToggle("ChatOffline", { Text = "Show offline members", Default = L.Offline, IgnoreConfig = true,
+                Tooltip = "Lists people who are offline too (public channels), with last seen for friends.",
+                Callback = function(v)
+                    L.Offline = v and true or false
+                    Lib:SaveLook72()
+                    local c = Lib.ChatObj
+                    if c then
+                        if c._mem then c._mem.sig = "" end
+                        if L.Offline then pcall(c._KickAllUsers, c, true) end
+                        pcall(c._RefreshMembers, c, true)
+                    end
+                end })
+            gb:AddToggle("ChatPeopleWin", { Text = "Member list in windowed chat", Default = L.Win, IgnoreConfig = true,
+                Tooltip = "Widens the chat panel by 232px. Needs spare screen width.",
+                Callback = function(v)
+                    L.Win = v and true or false
+                    Lib:SaveLook72()
+                    local c = Lib.ChatObj
+                    if c then
+                        pcall(c._ApplyLayout, c)
+                        pcall(c._SidebarLayout, c)
+                        pcall(c._RefreshMembers, c, true)
+                    end
+                end })
+        end)
+    end
+    return tab
+end
+
+-- ---------- 9) hook ----------
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p72 then
+        chat._p72 = true
+        Lib:LoadLook72()
+        local function Try(n, fn)
+            local ok, e = pcall(fn)
+            if not ok then warn("[Aether] " .. n .. ": " .. tostring(e)) end
+        end
+        Try("people button", function() chat:_P72Init() end)
+        Try("dnd button", function() chat:_P72UserBell() end)
+        Try("layout", function() chat:_ApplyLayout() chat:_SidebarLayout() end)
+        task.delay(6, function()
+            if not Lib.Unloaded and chat.Alive then pcall(chat._KickAllUsers, chat, true) end
+        end)
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 7.2 =====================
+
+-- ===================== Aether patch 7.3 =====================
+-- Paste right above the final `return Lib` (after patch 7.2).
+-- NOTE: this patch also requires the library's very first line to be:
+--   local warn, print = function() end, function() end
+do
+local P = {}
+Lib.Version = "7.3.0"
+
+local function Initial(name)
+    local s = tostring(name or "")
+    local ok, r = pcall(function()
+        local e = utf8.offset(s, 2)
+        return e and s:sub(1, e - 1) or s
+    end)
+    r = ok and r or ""
+    r = r:upper()
+    if r == "" then return "#" end
+    return r
+end
+
+local function StripMark(s)
+    local t, n = tostring(s):gsub("^<font color='#%x+'><b>«</b></font> ", "")
+    if n > 0 then t = t:gsub("»", "", 1) end
+    return t
+end
+
+local function GIds(ch)
+    local out, seen, me = {}, {}, LocalPlayer.UserId
+    for _, m in ipairs((ch and ch.members) or {}) do
+        local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+        if id and not seen[id] then
+            seen[id] = true
+            out[#out + 1] = id
+        end
+    end
+    table.sort(out, function(a, b)
+        if (a == me) ~= (b == me) then return b == me end
+        return a < b
+    end)
+    return out
+end
+
+local function Resolve(owner)
+    if not owner then return nil end
+    if owner.Groupboxes then
+        if not (owner._auto73 and owner._auto73.Frame and owner._auto73.Frame.Parent) then
+            owner._auto73 = owner:AddGroupbox("General", "Left", {})
+        end
+        return owner._auto73
+    end
+    if owner.Subs then return Resolve(owner:_Default()) end
+    return Resolve(owner.ActiveTab or (owner.Tabs and owner.Tabs[1]))
+end
+
+local function Fall(class)
+    class.__index = function(_, k)
+        local v = rawget(class, k)
+        if v ~= nil then return v end
+        if type(k) == "string" and k:sub(1, 3) == "Add" and rawget(Elements, k) ~= nil then
+            return function(self, ...)
+                local box = Resolve(self)
+                if not box then return nil end
+                return box[k](box, ...)
+            end
+        end
+        return nil
+    end
+end
+Fall(SubTab)
+Fall(Tab)
+Fall(Window)
+
+function Lib:_P73Chip(b)
+    if b._p73 then return end
+    b._p73 = true
+    local oStyle, oLayout = b.Style, b.Layout
+    local tile = New("Frame", { Name = "Tile", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(34, 34),
+        BackgroundTransparency = 0, Visible = false, Theme = { BackgroundColor3 = "Field" }, Parent = b.Button })
+    local tileCorner = Corner(tile, 17)
+    local pill = New("Frame", { Name = "Pill", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, -6, 0.5, 0), Size = UDim2.fromOffset(4, 0),
+        Visible = false, Theme = { BackgroundColor3 = "Text" }, Parent = b.Button })
+    Corner(pill, 2)
+    b.Dot.Parent = nil
+    Stroke(b.BadgeFrame, "Surface", 2, 0)
+    b.Hover = false
+    function b:Style(on)
+        if not self.Compact then
+            return oStyle(self, on)
+        end
+        self.Active = on and true or false
+        local T = Lib.Theme
+        local hover = self.Hover and not self.Active
+        Tween(tile, { BackgroundColor3 = self.Active and T.Accent or (hover and T.FieldHover or T.Field) }, 0.12)
+        Tween(tileCorner, { CornerRadius = UDim.new(0, (self.Active or hover) and 11 or 17) }, 0.14)
+        Tint(self.Icon, self.Active and Lib.KnobOn() or (hover and T.Text or T.SubText), 0.1)
+        Tween(pill, { Size = UDim2.fromOffset(4, self.Active and 22 or (hover and 12 or 0)) }, 0.14)
+    end
+    function b:Layout(_, compact)
+        oLayout(self, nil, compact)
+        local c = self.Compact
+        tile.Visible, pill.Visible = c, c
+        self.Fill.Visible = not c
+        self.Button.Size = UDim2.new(1, 0, 0, H(c and 38 or 32))
+        self.Icon.Size = UDim2.fromOffset(c and 18 or 15, c and 18 or 15)
+        self:Style(self.Active)
+    end
+    b.Button.MouseEnter:Connect(function()
+        b.Hover = true
+        if b.Compact then b:Style(b.Active) end
+    end)
+    b.Button.MouseLeave:Connect(function()
+        b.Hover = false
+        if b.Compact then b:Style(b.Active) end
+    end)
+end
+
+P.AddPanelButton = Window._AddPanelButton
+function Window:_AddPanelButton(panel, icon, label, tip)
+    local b = P.AddPanelButton(self, panel, icon, label, tip)
+    pcall(function()
+        Lib:_P73Chip(b)
+        b:Layout(nil, self.Compact)
+        local lay = self.Dock and self.Dock:FindFirstChildOfClass("UIListLayout")
+        if lay then lay.Padding = UDim.new(0, 6) end
+    end)
+    return b
+end
+
+P.SetThemeColor = Lib.SetThemeColor
+function Lib:SetThemeColor(key, color)
+    P.SetThemeColor(self, key, color)
+    if not self._dockQ73 then
+        self._dockQ73 = true
+        task.defer(function()
+            self._dockQ73 = false
+            local w = self.MainWindow
+            if w and w._RestyleDock then pcall(w._RestyleDock, w) end
+        end)
+    end
+end
+
+Lib.Look71.StatusBar = false
+P.LoadLook71 = Lib.LoadLook71
+function Lib:LoadLook71()
+    local L = P.LoadLook71(self)
+    if not self._m73 and FsOk() then
+        self._m73 = true
+        pcall(function()
+            local p = self.ConfigFolder .. "/look73.txt"
+            if isfile(p) then return end
+            L.StatusBar = false
+            self:SaveLook71()
+            if not isfolder(self.ConfigFolder) then makefolder(self.ConfigFolder) end
+            writefile(p, "1")
+        end)
+    end
+    return L
+end
+
+P.P71Status = Window._P71Status
+function Window:_P71Status()
+    P.P71Status(self)
+    local s = self._st71
+    if not s then return end
+    for _, c in ipairs(s.bar:GetChildren()) do
+        if c:IsA("Frame") then c.Visible = false end
+    end
+    s.right.Visible = false
+end
+
+function Chat:_P73EnsureFriends()
+    if self.Friends.loaded then return end
+    local done = false
+    self:RefreshFriends(function() done = true end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < 4 do task.wait(0.05) end
+end
+
+P.Do = Chat._Do
+function Chat:_Do(path, query, method, body, room)
+    if (path == "/group" or path == "/group/invite") and method == "POST" and type(body) == "string" then
+        local ok, d = pcall(HttpService.JSONDecode, HttpService, body)
+        if ok and type(d) == "table" then
+            local ids = {}
+            if type(d.members) == "table" then for _, v in ipairs(d.members) do ids[#ids + 1] = v end end
+            if type(d.uids) == "table" then for _, v in ipairs(d.uids) do ids[#ids + 1] = v end end
+            if d.uid ~= nil then ids[#ids + 1] = d.uid end
+            if #ids > 0 then
+                self:_P73EnsureFriends()
+                local bad = not self.Friends.loaded
+                if not bad then
+                    for _, id in ipairs(ids) do
+                        if self:FriendState(id) ~= "friends" then bad = true break end
+                    end
+                end
+                if bad then
+                    return { StatusCode = 403, Body = HttpService:JSONEncode({ ok = false, error = "You can only add friends to a group chat. Send a friend request first." }) }
+                end
+            end
+        end
+    end
+    return P.Do(self, path, query, method, body, room)
+end
+
+P.PeopleBrowser = Chat.PeopleBrowser
+function Chat:PeopleBrowser(o)
+    if (self._fo73 or 0) > 0 then
+        o.Scopes = { { "friends", "Friends" } }
+        o.Scope = "friends"
+        local click = o.OnClick
+        o.OnClick = function(u, refresh)
+            if self:FriendState(u.uid) ~= "friends" then
+                Lib:Notify({ Title = "Group chat", Text = "Only friends can be added to a group. Send a friend request first.", Type = "warn", Duration = 3 })
+                return
+            end
+            if click then click(u, refresh) end
+        end
+    end
+    return P.PeopleBrowser(self, o)
+end
+
+local function OnlyFriends(self, list)
+    local out, dropped = {}, false
+    for _, u in ipairs(list) do
+        if u and u.uid and self:FriendState(u.uid) == "friends" then out[#out + 1] = u else dropped = true end
+    end
+    return out, dropped
+end
+
+P.NewGroup = Chat.NewGroup
+function Chat:NewGroup(pre)
+    if type(pre) == "table" then
+        local kept, dropped = OnlyFriends(self, pre.uid and { pre } or pre)
+        pre = kept
+        if dropped then
+            Lib:Notify({ Title = "Group chat", Text = "Only friends can be added to a group. Send a friend request first.", Type = "warn", Duration = 3 })
+        end
+    end
+    self._fo73 = (self._fo73 or 0) + 1
+    local ok, err = pcall(P.NewGroup, self, pre)
+    self._fo73 = self._fo73 - 1
+    if not ok then error(err, 0) end
+end
+
+P.MultiPick = Chat._MultiPick
+function Chat:_MultiPick(o)
+    if type(o) == "table" and type(o.Preselect) == "table" then
+        o.Preselect = OnlyFriends(self, o.Preselect)
+    end
+    self._fo73 = (self._fo73 or 0) + 1
+    local ok, err = pcall(P.MultiPick, self, o)
+    self._fo73 = self._fo73 - 1
+    if not ok then error(err, 0) end
+end
+
+do
+    local loaded = false
+    function Lib:LoadGroupIcons()
+        if loaded then return self.GroupIcons end
+        loaded = true
+        if FsOk() then
+            pcall(function()
+                local p = self.ConfigFolder .. "/groupicons.json"
+                if not isfile(p) then return end
+                local d = HttpService:JSONDecode(readfile(p))
+                if type(d) ~= "table" then return end
+                for gid, e in pairs(d) do
+                    if type(gid) == "string" and type(e) == "table" then
+                        local out = {}
+                        if e.id ~= nil and #tostring(e.id) < 80 then
+                            out.id = tostring(e.id)
+                            out.mime = type(e.mime) == "string" and e.mime or "image/png"
+                        end
+                        if type(e.file) == "string" and #e.file < 200 then out.file = e.file end
+                        if out.id or out.file then
+                            out.shared = e.shared == true
+                            out.own = e.own == true or e.shared == false
+                            out.at = tonumber(e.at) or 0
+                            self.GroupIcons[gid] = out
+                        end
+                    end
+                end
+            end)
+        end
+        return self.GroupIcons
+    end
+end
+
+function Chat:_P73IconAsset(entry, room, cb)
+    if entry.file and FsOk() then
+        local ok, ex = pcall(isfile, entry.file)
+        if ok and ex then
+            local a = CustomAsset(entry.file)
+            if a then cb(a) return end
+        end
+    end
+    if entry.id then self:_IconAsset(entry, room, cb) end
+end
+
+function Chat:_P73GroupAv(parent, ch, px, z)
+    local f = New("Frame", { Name = "GAv73", Size = UDim2.fromOffset(px, px), BackgroundTransparency = 0, ZIndex = z,
+        Theme = { BackgroundColor3 = "Field" }, Parent = parent })
+    Corner(f, px / 2)
+    local init = New("TextLabel", { Text = Initial(ch.name), Font = Lib.FontBold, TextSize = math.max(10, math.floor(px * 0.48)),
+        Size = UDim2.fromScale(1, 1), ZIndex = z + 1, Theme = { TextColor3 = "SubText" }, Parent = f })
+    local entry = Lib:LoadGroupIcons()[tostring(ch.gid)]
+    if not entry then
+        local ids = GIds(ch)
+        if #ids > 0 then
+            self:_Collage(f, ids, px, z + 1)
+            init.Visible = false
+        end
+    else
+        local img = New("ImageLabel", { Size = UDim2.fromScale(1, 1), ScaleType = Enum.ScaleType.Crop, Visible = false, ZIndex = z + 2, Parent = f })
+        Corner(img, px / 2)
+        self:_P73IconAsset(entry, ch.room, function(a)
+            if img.Parent then
+                img.Image, img.Visible = a, true
+                init.Visible = false
+            end
+        end)
+    end
+    return f
+end
+
+function Chat:_P73Header()
+    local btn, label = self.ChBtn, self.ChLabel
+    if not (btn and btn.Parent and label) then return end
+    local ch = self.Channels[self.ChIndex]
+    if not (ch and ch.kind == "grp") then
+        if self._gav73 then
+            self._gav73:Destroy()
+            self._gav73, self._gavKey = nil, nil
+        end
+        return
+    end
+    if self._hdrAv then self._hdrAv.Visible = false end
+    if self._gcol then
+        self._gcol:Destroy()
+        self._gcol, self._gcKey = nil, nil
+    end
+    if self._topicBase then
+        self._topicBase = StripMark(self._topicBase)
+        self:_PaintTopic()
+    end
+    label.Text = StripMark(label.Text)
+    local entry = Lib:LoadGroupIcons()[tostring(ch.gid)]
+    local ids = GIds(ch)
+    local key = ch.room .. ":" .. (entry and tostring(entry.file or entry.id) or "") .. ":" .. table.concat(ids, ",", 1, math.min(#ids, 4))
+    if self._gavKey ~= key or not (self._gav73 and self._gav73.Parent) then
+        if self._gav73 then self._gav73:Destroy() end
+        local av = self:_P73GroupAv(btn, ch, 22, 3)
+        av.AnchorPoint, av.Position = Vector2.new(0, 0.5), UDim2.new(0, 7, 0.5, 0)
+        self._gav73, self._gavKey = av, key
+    end
+    label.Position = UDim2.fromOffset(36, 0)
+    label.Size = UDim2.new(1, -92, 1, 0)
+end
+
+P.RefreshChannel = Chat._RefreshChannel
+function Chat:_RefreshChannel()
+    P.RefreshChannel(self)
+    pcall(function() self:_P73Header() end)
+end
+
+function Chat:_P73Sidebar()
+    local sb = self._sb
+    if not (sb and sb.list.Parent and sb.card.Visible) then return end
+    local used = {}
+    for _, row in ipairs(sb.list:GetChildren()) do
+        if row.Name == "Ch" and row:IsA("TextButton") and not row:FindFirstChild("GAv73") then
+            local nameLbl, ch
+            for _, c in ipairs(row:GetChildren()) do
+                if c:IsA("TextLabel") and not ch then
+                    for _, c2 in ipairs(self.Channels) do
+                        if c2.kind == "grp" and not used[c2] and tostring(c2.name) == c.Text then
+                            ch, nameLbl = c2, c
+                            used[c2] = true
+                            break
+                        end
+                    end
+                end
+            end
+            if ch then
+                for _, c in ipairs(row:GetChildren()) do
+                    if c:IsA("ImageLabel") and c.Size == UDim2.fromOffset(18, 18) then
+                        c:Destroy()
+                    elseif c:IsA("Frame") and c.Name == "Collage" then
+                        c:Destroy()
+                    elseif c:IsA("TextLabel") and c ~= nameLbl and (c.Text == "«" or c.Position == UDim2.fromOffset(4, 0)) then
+                        c.Text = ""
+                    elseif c:IsA("TextLabel") and c ~= nameLbl and c.Text:match("^%d+ Members?$") then
+                        c.Position = UDim2.fromOffset(32, c.Position.Y.Offset)
+                    end
+                end
+                local av = self:_P73GroupAv(row, ch, 22, 3)
+                av.AnchorPoint, av.Position = Vector2.new(0, 0.5), UDim2.new(0, 4, 0.5, 0)
+                nameLbl.Position = UDim2.fromOffset(32, nameLbl.Position.Y.Offset)
+                nameLbl.Size = UDim2.new(nameLbl.Size.X.Scale, -72, nameLbl.Size.Y.Scale, nameLbl.Size.Y.Offset)
+            end
+        end
+    end
+end
+
+P.RenderSidebar = Chat._RenderSidebar
+function Chat:_RenderSidebar()
+    P.RenderSidebar(self)
+    pcall(function() self:_P73Sidebar() end)
+end
+
+P.PopMenu = Chat._PopMenu
+function Chat:_PopMenu(spec, anchor)
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.PopMenu(self, spec, anchor)
+    if not (spec and spec.Group) then return end
+    pcall(function()
+        local menu
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c.Name == "ConvoMenu" then menu = c end
+        end
+        if not menu then return end
+        for _, d in ipairs(menu:GetDescendants()) do
+            if d:IsA("ImageLabel") and d.Size == UDim2.fromOffset(36, 36) then
+                for _, k in ipairs(d:GetChildren()) do
+                    if not k:IsA("UICorner") then k:Destroy() end
+                end
+                d.Image = ""
+                d.BackgroundTransparency = 1
+                self:_P73GroupAv(d, spec.Group, 36, d.ZIndex + 1)
+                break
+            end
+        end
+    end)
+end
+
+P.PaintWelcome = Chat._PaintWelcome
+function Chat:_PaintWelcome()
+    P.PaintWelcome(self)
+    pcall(function()
+        local w = self._wel
+        local ch = self.Channels[self.ChIndex]
+        if not (w and ch and ch.kind == "grp" and w.f.Visible) then return end
+        local entry = Lib:LoadGroupIcons()[tostring(ch.gid)]
+        local gk = tostring(w.key) .. ":" .. (entry and tostring(entry.file or entry.id) or "")
+        if w.gk == gk then return end
+        w.gk = gk
+        w.glyph.Text = Initial(ch.name)
+        if entry then
+            local key = w.key
+            self:_P73IconAsset(entry, ch.room, function(a)
+                if w.img.Parent and w.key == key then
+                    w.img.Image, w.img.Visible, w.glyph.Visible = a, true, false
+                end
+            end)
+        end
+    end)
+end
+
+local function GlyphFix(d)
+    if not (d:IsA("TextLabel") and d.Text == "«") then return end
+    task.defer(function()
+        if not d.Parent or d.Text ~= "«" then return end
+        if d.Size ~= UDim2.fromScale(1, 1) then return end
+        d.Text = ""
+        local px = math.max(12, math.floor(d.Parent.AbsoluteSize.X / math.max(Lib.Scale, 0.01) * 0.5))
+        Lib.Icon("users", px, "SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = d.ZIndex, Parent = d.Parent })
+    end)
+end
+for _, root in ipairs({ Lib.Overlay, Lib.Gui }) do
+    Lib:Connect(root.DescendantAdded, GlyphFix)
+end
+
+function Chat:_SetGroupIcon(pk, payload)
+    Lib:Notify({ Title = "Group icon", Text = "Setting icon...", Type = "info", Duration = 2 })
+    task.spawn(function()
+        local I = Lib:LoadGroupIcons()
+        local gid = pk.gid
+        local entry = { own = true, shared = false, at = os.time(), mime = "image/png" }
+        local path, fin = nil, false
+        self:_FetchBg(payload, function(p) path, fin = p, true end)
+        local t0 = os.clock()
+        while not fin and os.clock() - t0 < 15 do task.wait(0.1) end
+        if path then
+            entry.file = path
+            I[gid] = entry
+            Lib:SaveGroupIcons()
+            self:_RefreshChannel()
+            self:_QueueSidebar()
+        end
+        local d = Decode(self:_Do("/upload", nil, "POST", HttpService:JSONEncode(payload), pk.room))
+        if d and d.ok and d.id ~= nil then
+            entry.id = tostring(d.id)
+            if type(d.mime) == "string" then entry.mime = d.mime end
+        end
+        if not (entry.file or entry.id) then
+            Lib:Notify({ Title = "Group icon", Text = (d and d.error) or "Couldn't load that picture. Try another.", Type = "error" })
+            return
+        end
+        I[gid] = entry
+        local note
+        if entry.id then
+            local r = Decode(self:_Do("/group/icon", nil, "POST", HttpService:JSONEncode({ id = gid, image = entry.id }), pk.room))
+            if r and r.ok then
+                entry.shared, entry.at = true, os.time()
+            else
+                note = (r and r.error) or "Your server doesn't support shared group icons yet."
+            end
+        else
+            note = "The upload failed, so only you can see it."
+        end
+        Lib:SaveGroupIcons()
+        self:_RefreshChannel()
+        self:_QueueSidebar()
+        Lib:Notify({ Title = "Group icon", Text = note and ("Icon set for you. " .. note) or "Group icon updated for everyone.",
+            Type = note and "warn" or "success", Duration = 4 })
+    end)
+end
+
+P.ClearGroupIcon = Chat.ClearGroupIcon
+function Chat:ClearGroupIcon(ch)
+    P.ClearGroupIcon(self, ch)
+    pcall(function() self:_RefreshChannel() end)
+end
+
+P.SyncRooms = Chat._SyncRooms
+function Chat:_SyncRooms(dms, groups)
+    local I = Lib:LoadGroupIcons()
+    local keep = {}
+    for gid, e in pairs(I) do
+        if e.own and (not e.shared or os.time() - (e.at or 0) < 120) then keep[gid] = e end
+    end
+    P.SyncRooms(self, dms, groups)
+    local restored = false
+    for gid, e in pairs(keep) do
+        if I[gid] ~= e then
+            I[gid] = e
+            restored = true
+        end
+    end
+    if restored then Lib:SaveGroupIcons() end
+end
+
+function Chat:_P73Jump()
+    local j = self.Jump
+    if not j or self._jump73 then return end
+    self._jump73 = true
+    j.AutomaticSize = Enum.AutomaticSize.None
+    j.Size = UDim2.new(1, -24, 0, 24)
+    j.TextSize = 12
+    j.Font = Lib.FontBold
+    for _, c in ipairs(j:GetChildren()) do
+        if c:IsA("UIPadding") then c:Destroy() end
+    end
+    local cr = j:FindFirstChildOfClass("UICorner")
+    if cr then cr.CornerRadius = UDim.new(0, 6) end
+    local busy = false
+    local function Fix()
+        if busy then return end
+        local t = j.Text
+        local want
+        local n = t:match("^↓ (%d+) new$")
+        if n then
+            want = n .. (n == "1" and " new message" or " new messages") .. "  ·  Jump To Present"
+        elseif t == "↓ Latest" then
+            want = "You're viewing older messages  ·  Jump To Present"
+        end
+        if want then
+            busy = true
+            j.Text = want
+            busy = false
+        end
+    end
+    j:GetPropertyChangedSignal("Text"):Connect(Fix)
+    Fix()
+end
+
+function Chat:_P73Keys()
+    Lib:Connect(UIS.InputBegan, function(i)
+        if not (self.PanelObj and self.PanelObj._shown and self.Frame.Visible) then return end
+        if i.KeyCode == Enum.KeyCode.PageUp or i.KeyCode == Enum.KeyCode.PageDown then
+            if not (IsOver(self.Frame) or self.Input:IsFocused()) then return end
+            local dir = i.KeyCode == Enum.KeyCode.PageUp and -1 or 1
+            local l = self.List
+            local step = l.AbsoluteSize.Y / math.max(Lib.Scale, 0.01) * 0.85
+            local y = Clamp(l.CanvasPosition.Y + dir * step, 0, math.max(0, l.AbsoluteCanvasSize.Y - l.AbsoluteSize.Y))
+            l.CanvasPosition = Vector2.new(0, y)
+        elseif i.KeyCode == Enum.KeyCode.Escape and not self.ReplyTo and self.Input:IsFocused() and self.Input.Text == "" then
+            self:ScrollBottom()
+        end
+    end)
+end
+
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p73 then
+        chat._p73 = true
+        pcall(function() chat:_P73Jump() end)
+        pcall(function() chat:_P73Keys() end)
+        pcall(function()
+            chat:_RefreshChannel()
+            chat:_QueueSidebar()
+        end)
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 7.3 =====================
+
+-- ===================== Aether patch 7.4 =====================
+-- Paste right above the final `return Lib` (after patch 7.3).
+do
+local P = {}
+Lib.Version = "7.4.0"
+local ARROW = utf8.char(0x21AA)
+
+-- ==================== 1) AddLog ====================
+do
+    local prev = Elements.AddLog
+    Elements.AddLog = function(self, idx, info)
+        local obj = prev(self, idx, info)
+        if type(obj) == "table" and obj.Log then
+            local raw = obj.Log
+            local function Put(kind)
+                return function(_, text, k) return raw(obj, text, kind or k) end
+            end
+            obj.AddLog, obj.Add, obj.Append, obj.Write, obj.Print = Put(nil), Put(nil), Put(nil), Put(nil), Put(nil)
+            obj.Info, obj.Good, obj.Success = Put("info"), Put("good"), Put("good")
+            obj.Warn, obj.Bad, obj.Error = Put("warn"), Put("bad"), Put("bad")
+            function obj:Set(text, kind)
+                self:Clear()
+                raw(self, text, kind)
+            end
+        end
+        return obj
+    end
+
+    function Lib:AddLog(...)
+        local w = self.MainWindow
+        if w then return w:AddLog(...) end
+    end
+end
+
+-- ==================== 2) "Using" row wraps ====================
+P.ShowProfile = Chat.ShowProfile
+function Chat:ShowProfile(u)
+    if self._noProfileUntil and os.clock() < self._noProfileUntil then return end
+    local before = {}
+    for _, c in ipairs(Lib.Overlay:GetChildren()) do before[c] = true end
+    P.ShowProfile(self, u)
+    pcall(function()
+        local dim
+        for _, c in ipairs(Lib.Overlay:GetChildren()) do
+            if not before[c] and c:IsA("TextButton") then dim = c end
+        end
+        local card = dim and dim:FindFirstChildWhichIsA("Frame")
+        local row = card and card:FindFirstChild("HubRow")
+        if not row then return end
+        local label, val
+        for _, c in ipairs(row:GetChildren()) do
+            if c:IsA("TextLabel") then
+                if c.TextXAlignment == RIGHT then val = c else label = c end
+            end
+        end
+        if label then label.TextYAlignment = Enum.TextYAlignment.Top end
+        if val then
+            val.TextTruncate = Enum.TextTruncate.None
+            val.TextYAlignment = Enum.TextYAlignment.Top
+            Wrap(val, row, 0, 18)
+        end
+    end)
+end
+
+-- ==================== 3) panel buttons: no background ====================
+function Lib:_P74Chip(b)
+    if not b or b._p74 then return end
+    b._p74 = true
+    local btn = b.Button
+    local tile = btn:FindFirstChild("Tile")
+    local pill = btn:FindFirstChild("Pill")
+    local prev = b.Style
+    function b:Style(on)
+        if not self.Compact then return prev(self, on) end
+        self.Active = on and true or false
+        local T = Lib.Theme
+        local hover = self.Hover and not self.Active
+        if tile then tile.BackgroundTransparency = 1 end
+        Tint(self.Icon, self.Active and T.Accent or (hover and T.Text or T.SubText), 0.1)
+        if pill then
+            Tween(pill, { Size = UDim2.fromOffset(4, self.Active and 22 or (hover and 12 or 0)) }, 0.14)
+        end
+    end
+    if tile then tile.BackgroundTransparency = 1 end
+    b:Style(b.Active)
+end
+
+P.AddPanelButton = Window._AddPanelButton
+function Window:_AddPanelButton(panel, icon, label, tip)
+    local b = P.AddPanelButton(self, panel, icon, label, tip)
+    pcall(function() Lib:_P74Chip(b) end)
+    return b
+end
+
+-- ==================== 4) panels: hidden by default, independent, raise on press ====================
+function Lib:_FinishPanel(panel)
+    self:_Place(panel)
+    panel:Set(false, true)
+end
+
+P.Place = Lib._Place
+function Lib:_Place(panel, animate)
+    local win = self.MainWindow
+    if win and win.Dragged and panel and panel.Side and not panel.Moved and not panel._forcePlace then return end
+    return P.Place(self, panel, animate)
+end
+
+P.MakePanel = Lib._MakePanel
+function Lib:_MakePanel(...)
+    local panel, frame = P.MakePanel(self, ...)
+    local od = panel.Dock
+    function panel:Dock(animate)
+        self._forcePlace = true
+        local r = od(self, animate)
+        self._forcePlace = nil
+        return r
+    end
+    return panel, frame
+end
+
+local Frames = {}
+local function Raise(f)
+    if not (f and f.Parent) then return end
+    local top = 0
+    for _, o in ipairs(Frames) do
+        if o.Parent and o ~= f and o.ZIndex > top then top = o.ZIndex end
+    end
+    if f.ZIndex > top then return end
+    local list = {}
+    for _, o in ipairs(Frames) do
+        if o.Parent and o ~= f then list[#list + 1] = o end
+    end
+    table.sort(list, function(a, b) return a.ZIndex < b.ZIndex end)
+    local z = 1
+    for _, o in ipairs(list) do
+        z = z + 1
+        o.ZIndex = z
+    end
+    f.ZIndex = z + 1
+end
+
+P.NewPanel = Lib._NewPanel
+function Lib:_NewPanel(name, frame, startShown)
+    local p = P.NewPanel(self, name, frame, startShown)
+    Frames[#Frames + 1] = frame
+    return p
+end
+
+Lib:Connect(UIS.InputBegan, function(input)
+    if not IsPress(input) then return end
+    local pos = Pointer(input)
+    local best
+    for _, f in ipairs(Frames) do
+        if f.Parent and f.Visible and IsOver(f, pos) and (not best or f.ZIndex > best.ZIndex) then best = f end
+    end
+    if best then Raise(best) end
+end)
+
+P.ChatFs = Chat.SetFullscreen
+function Chat:SetFullscreen(s)
+    P.ChatFs(self, s)
+    if s then Raise(self.Frame) end
+end
+
+P.WinFs = Window.SetFullscreen
+function Window:SetFullscreen(s)
+    P.WinFs(self, s)
+    if s then Raise(self.Main) end
+end
+
+-- ==================== 5) touch: no keyboard hints ====================
+local function CtrlFix(d)
+    if not (Lib.Touch and d:IsA("TextLabel")) then return end
+    local t = d.Text
+    if t:match("^Ctrl%s*%+?%s*[FK]$") then
+        if d.Name == "KbdChip" then
+            d.Visible = false
+        else
+            d.Text = ""
+            local p = d.Parent
+            if p and p:IsA("Frame") then
+                for _, s in ipairs(p:GetChildren()) do
+                    if s:IsA("TextLabel") and s ~= d and s.Text == "Search" then p.Visible = false end
+                end
+            end
+        end
+    elseif t:find("^Up / Down to move") then
+        d.Visible = false
+    end
+end
+for _, root in ipairs({ Lib.Gui, Lib.Overlay }) do
+    for _, d in ipairs(root:GetDescendants()) do pcall(CtrlFix, d) end
+    Lib:Connect(root.DescendantAdded, function(d) pcall(CtrlFix, d) end)
+end
+
+-- ==================== 6) group owner: make owner + kick (member menu) ====================
+local function IsMember(ch, uid)
+    for _, m in ipairs(ch.members or {}) do
+        local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+        if id == uid then return true end
+    end
+    return false
+end
+
+function Chat:_AfterMemberChange(ch, uid)
+    local keep = {}
+    for _, m in ipairs(ch.members or {}) do
+        local id = tonumber(type(m) == "table" and (m.uid or m.id) or m)
+        if id ~= uid then keep[#keep + 1] = m end
+    end
+    ch.members = keep
+    ch._sig = nil
+    pcall(function()
+        if self._mem then self._mem.sig = "" end
+        self:_RefreshMembers(true)
+    end)
+    self:_RefreshChannel()
+    self:SaveConvos()
+end
+
+function Chat:GroupKick(ch, user)
+    local uid = tonumber(user.uid)
+    if not uid then return end
+    local nm = tostring((user.display ~= nil and user.display ~= "") and user.display or user.name or uid)
+    Lib:Dialog({ Title = "Kick from group", Text = "Remove " .. nm .. " from «" .. tostring(ch.name) .. "»? A friend can invite them back in.",
+        Buttons = { { Text = "Cancel" }, { Text = "Kick", Primary = true, Callback = function()
+            task.spawn(function()
+                local d = Decode(self:_Do("/group/kick", nil, "POST", HttpService:JSONEncode({ id = ch.gid, uid = uid }), ch.room))
+                if d and d.ok then
+                    self:_AfterMemberChange(ch, uid)
+                    Lib:Notify({ Title = "Group chat", Text = nm .. " was removed.", Type = "success", Duration = 3 })
+                    self:_PollOnce()
+                else
+                    Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't kick them. Is your worker v2.6.0?", Type = "error" })
+                end
+            end)
+        end } } })
+end
+
+function Chat:GroupMakeOwner(ch, user)
+    local uid = tonumber(user.uid)
+    if not uid then return end
+    local nm = tostring((user.display ~= nil and user.display ~= "") and user.display or user.name or uid)
+    Lib:Dialog({ Title = "Make owner", Text = "Make " .. nm .. " the owner of «" .. tostring(ch.name) .. "»? You lose owner rights.",
+        Buttons = { { Text = "Cancel" }, { Text = "Make owner", Primary = true, Callback = function()
+            task.spawn(function()
+                local d = Decode(self:_Do("/group/owner", nil, "POST", HttpService:JSONEncode({ id = ch.gid, uid = uid }), ch.room))
+                if d and d.ok then
+                    ch.creator, ch.owner = uid, uid
+                    ch._sig = nil
+                    Lib:Notify({ Title = "Group chat", Text = nm .. " is now the owner.", Type = "success", Duration = 3 })
+                    pcall(function() if self._mem then self._mem.sig = "" end self:_RefreshMembers(true) end)
+                    self:_RefreshChannel()
+                    self:_PollOnce()
+                else
+                    Lib:Notify({ Title = "Group chat", Text = (d and d.error) or "Couldn't hand it over.", Type = "error" })
+                end
+            end)
+        end } } })
+end
+
+function Chat:UserMenu(user, anchor)
+    local name = tostring(user.display or user.name)
+    local items = {
+        { Text = "View profile", Callback = function() self:ShowProfile(user) end },
+        { Text = "Mention", Callback = function() self:Prefill(self.Input.Text .. "@" .. tostring(user.name) .. " ") end },
+    }
+    if type(setclipboard) == "function" then
+        items[#items + 1] = { Text = "Copy user id", Callback = function() setclipboard(tostring(user.uid)) end }
+    end
+    local me = LocalPlayer.UserId
+    local uid = tonumber(user.uid)
+    local ch = self.Channels[self.ChIndex]
+    if uid and uid ~= me and ch and ch.kind == "grp" and tonumber(ch.creator or ch.owner) == me and IsMember(ch, uid) then
+        items[#items + 1] = { Header = true, Text = "GROUP OWNER" }
+        items[#items + 1] = { Text = "Make group owner", Callback = function() self:GroupMakeOwner(ch, user) end }
+        items[#items + 1] = { Text = "Kick from group", Danger = true, Callback = function() self:GroupKick(ch, user) end }
+    end
+    if uid and uid ~= me then
+        local blocked = Lib:IsBlocked(user.uid)
+        items[#items + 1] = { Text = blocked and "Unblock user" or "Block user", Danger = not blocked, Callback = function()
+            if blocked then Lib:Unblock(user.uid) else Lib:Block(user.uid, name) end
+        end }
+    end
+    self:Menu(items, anchor)
+end
+
+-- mobile: hold a member row to open the same menu
+P.MemberRow = Chat._MemberRow
+function Chat:_MemberRow(parent, e, order)
+    local before = {}
+    for _, c in ipairs(parent:GetChildren()) do before[c] = true end
+    P.MemberRow(self, parent, e, order)
+    pcall(function()
+        local row
+        for _, c in ipairs(parent:GetChildren()) do
+            if not before[c] and c.Name == "MemRow" then row = c end
+        end
+        if not row then return end
+        local u = { uid = e.uid, name = e.name, display = e.display }
+        row.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.Touch then return end
+            local held, c = true, nil
+            c = UIS.InputEnded:Connect(function(i)
+                if i == input then held = false c:Disconnect() end
+            end)
+            task.delay(0.45, function()
+                if not held then return end
+                held = false
+                c:Disconnect()
+                self._noProfileUntil = os.clock() + 0.6
+                self.LastPtr = Pointer(input)
+                self:UserMenu(u, row)
+            end)
+        end)
+    end)
+end
+
+-- ==================== 7) markdown ====================
+local MK = {}
+for i, k in ipairs({ "h1o", "h1c", "h2o", "h2c", "h3o", "h3c", "sbo", "sbc", "uo", "uc", "q", "io", "ic" }) do
+    MK[k] = utf8.char(0xE000 + i - 1)
+end
+local S1, S2 = utf8.char(0xE100), utf8.char(0xE101)
+
+local function MdTags()
+    return {
+        [MK.h1o] = "<font size='26'><b>", [MK.h1c] = "</b></font>",
+        [MK.h2o] = "<font size='21'><b>", [MK.h2c] = "</b></font>",
+        [MK.h3o] = "<font size='17'><b>", [MK.h3c] = "</b></font>",
+        [MK.sbo] = "<font size='11' color='#" .. Hex("Dim") .. "'>", [MK.sbc] = "</font>",
+        [MK.uo] = "<u>", [MK.uc] = "</u>",
+        [MK.q] = "<font color='#" .. Hex("Dim") .. "'>▎ </font>",
+        [MK.io] = "<i>", [MK.ic] = "</i>",
+    }
+end
+
+local function Ital(s)
+    s = " " .. s .. " "
+    for _ = 1, 2 do
+        s = s:gsub("([%s%p])_([^_\n]+)_([%s%p])", function(a, c, b)
+            if c:match("^%s") or c:match("%s$") then return nil end
+            return a .. MK.io .. c .. MK.ic .. b
+        end)
+    end
+    return s:sub(2, -2)
+end
+
+P.Rich = Chat._Rich
+function Chat:_Rich(text, meta)
+    text = tostring(text or "")
+    local rest = text:match("^" .. ARROW .. " Forwarded from [^\n]*\n?(.*)$")
+    if rest then text = rest end
+    if text == "" then return P.Rich(self, "", meta) end
+    local hit = text:find("#", 1, true) or text:find(">", 1, true) or text:find("_", 1, true)
+        or text:match("^%s*[%-%*] ") or text:find("\n%s*[%-%*] ")
+    if not hit then return P.Rich(self, text, meta) end
+
+    local stash = {}
+    local function Keep(s)
+        stash[#stash + 1] = s
+        return S1 .. #stash .. S2
+    end
+    text = text:gsub("`[^`\n]+`", Keep)
+    text = text:gsub("https?://[^%s<>]+", Keep)
+
+    local out, quoteAll = {}, false
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+        local r = line
+        if quoteAll then
+            r = MK.q .. line
+        else
+            local hs, hb = line:match("^(#+) (.+)$")
+            if hs and #hs <= 3 then
+                r = MK["h" .. #hs .. "o"] .. hb .. MK["h" .. #hs .. "c"]
+            elseif line:match("^%-# .") then
+                r = MK.sbo .. line:sub(4) .. MK.sbc
+            elseif line:match("^>>> ") then
+                quoteAll = true
+                r = MK.q .. line:sub(5)
+            elseif line:match("^> ") then
+                r = MK.q .. line:sub(3)
+            else
+                local ind, lb = line:match("^(%s*)[%-%*] (.+)$")
+                if ind then r = ind .. ((#ind >= 2) and "◦ " or "• ") .. lb end
+            end
+        end
+        out[#out + 1] = r
+    end
+    text = table.concat(out, "\n")
+
+    text = text:gsub("__(.-)__", function(c)
+        if c == "" or c:match("^%s") or c:match("%s$") then return nil end
+        return MK.uo .. c .. MK.uc
+    end)
+    text = Ital(text)
+    text = text:gsub(S1 .. "(%d+)" .. S2, function(n) return stash[tonumber(n)] end)
+
+    local s = P.Rich(self, text, meta)
+    for m, r in pairs(MdTags()) do
+        s = (s:gsub(m, function() return r end))
+    end
+    return s
+end
+
+-- ==================== 8) hook ====================
+P.CreateChat = Lib.CreateChat
+function Lib:CreateChat(cfg)
+    local chat = P.CreateChat(self, cfg)
+    if chat and not chat._p74 then
+        chat._p74 = true
+        chat._baseMax = 500 -- normal messages may be 500 characters now (worker v2.6.0)
+    end
+    return chat
+end
+
+end
+-- ===================== end patch 7.4 =====================
+
+-- ===================== Aether patch 7.5 (sub-tab underline animation) =====================
+-- Paste right above the final `return Lib` (after patch 7.4).
+do
+local P = {}
+Lib.Version = "7.5.0"
+
+-- knobs
+local HOVER_W = 0.4   -- width of the line on hover, as a fraction of the pill (0..1)
+local BAR_H   = 2     -- line thickness (px)
+local DOWN_H  = 3     -- line thickness while pressed (px)
+
+-- The library's own SelectSub tweens Under.BackgroundTransparency to 1 on inactive subs, which would
+-- make the hover line invisible. Bars tagged "p75bar" ignore that and only animate their size.
+local PrevTween = Tween
+Tween = function(inst, props, ...)
+    if typeof(inst) == "Instance" and type(props) == "table" and props.BackgroundTransparency ~= nil and inst:GetAttribute("p75bar") then
+        local rest, n = {}, 0
+        for k, v in pairs(props) do
+            if k ~= "BackgroundTransparency" then rest[k] = v n = n + 1 end
+        end
+        if n == 0 then
+            return { Completed = Signal.new(), Cancel = function() end, Play = function() end, Pause = function() end }
+        end
+        props = rest
+    end
+    return PrevTween(inst, props, ...)
+end
+Lib.Tween = Tween
+
+function Lib:_P75Paint(sub)
+    local pill, bar = sub.Pill, sub.Under
+    if not (pill and pill.Parent and bar and bar.Parent) then return end
+    local active = sub.Tab ~= nil and sub.Tab.ActiveSub == sub
+    local w = active and 1 or (sub._hov75 and HOVER_W or 0)
+    local h = sub._down75 and DOWN_H or BAR_H
+    Tween(bar, { Size = UDim2.new(w, 0, 0, h) }, 0.2, Enum.EasingStyle.Quint)
+    Tween(pill, { TextColor3 = (active or sub._hov75) and Lib.Theme.Text or Lib.Theme.SubText }, 0.12)
+end
+
+-- turns one sub-tab pill into an animated one (safe to call again: it only installs once per pill)
+function Lib:_P75Sub(sub)
+    local pill = sub and sub.Pill
+    if not (pill and pill.Parent) or pill:GetAttribute("p75") then return end
+    pill:SetAttribute("p75", true)
+    sub._hov75, sub._down75 = false, false
+
+    local bar = sub.Under
+    if not (bar and bar.Parent) then
+        bar = New("Frame", { Name = "Under", Theme = { BackgroundColor3 = "Accent" }, Parent = pill })
+        sub.Under = bar
+    end
+    bar:SetAttribute("p75bar", true)
+    bar.AnchorPoint = Vector2.new(0.5, 1)
+    bar.Position = UDim2.fromScale(0.5, 1)
+    bar.BackgroundTransparency = 0
+    local active = sub.Tab ~= nil and sub.Tab.ActiveSub == sub
+    bar.Size = UDim2.new(active and 1 or 0, 0, 0, BAR_H)
+    if not bar:FindFirstChildOfClass("UICorner") then Corner(bar, 1) end
+    -- an in-flight transparency tween from the original SelectSub could still land after this
+    task.delay(0.3, function() if bar.Parent then bar.BackgroundTransparency = 0 end end)
+
+    pill.MouseEnter:Connect(function()
+        sub._hov75 = true
+        Lib:_P75Paint(sub)
+    end)
+    pill.MouseLeave:Connect(function()
+        sub._hov75, sub._down75 = false, false
+        Lib:_P75Paint(sub)
+    end)
+    pill.InputBegan:Connect(function(input)
+        if IsPress(input) then
+            sub._down75 = true
+            Lib:_P75Paint(sub)
+        end
+    end)
+    pill.InputEnded:Connect(function(input)
+        if IsPress(input) then
+            sub._down75 = false
+            Lib:_P75Paint(sub)
+        end
+    end)
+end
+
+-- new sub-tabs
+P.AddSubTab = Tab.AddSubTab
+function Tab:AddSubTab(name, icon)
+    local sub = P.AddSubTab(self, name, icon)
+    pcall(function()
+        Lib:_P75Sub(sub)
+        Lib:_P75Paint(sub)
+    end)
+    return sub
+end
+
+-- every selection repaints all sub-tabs of that tab (the old active one shrinks, the new one grows)
+P.SelectSub = Tab.SelectSub
+function Tab:SelectSub(sub)
+    P.SelectSub(self, sub)
+    pcall(function()
+        for _, s in ipairs(self.Subs) do
+            Lib:_P75Sub(s)
+            Lib:_P75Paint(s)
+        end
+    end)
+end
+
+-- patch 6.6 moves Interface / ESP / Configs / Server into the Profile tab with brand-new pills,
+-- so everything is styled again once the settings tab has been built
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    pcall(function()
+        local w = window or self.MainWindow
+        for _, t in ipairs(w.Tabs) do
+            for _, s in ipairs(t.Subs) do
+                self:_P75Sub(s)
+                self:_P75Paint(s)
+            end
+        end
+    end)
+    return tab
+end
+
+end
+-- ===================== end patch 7.5 =====================
+
+-- ===================== Aether patch 7.6 (floating panels) =====================
+-- Paste right above the final `return Lib` (after patch 7.5).
+do
+local P = {}
+Lib.Version = "7.6.0"
+Lib.PanelFollow = false
+
+-- ---------- saved choice ----------
+local pfLoaded = false
+function Lib:LoadPanelFollow()
+    if pfLoaded then return self.PanelFollow end
+    pfLoaded = true
+    if FsOk() then
+        pcall(function()
+            local p = self.ConfigFolder .. "/panelfollow.txt"
+            if isfile(p) then self.PanelFollow = Trim(readfile(p)) == "1" end
+        end)
+    end
+    return self.PanelFollow
+end
+
+function Lib:SetPanelFollow(on)
+    self.PanelFollow = on and true or false
+    pfLoaded = true
+    if FsOk() then
+        pcall(function()
+            if not isfolder(self.ConfigFolder) then makefolder(self.ConfigFolder) end
+            writefile(self.ConfigFolder .. "/panelfollow.txt", self.PanelFollow and "1" or "0")
+        end)
+    end
+    if self.PanelFollow then
+        -- back to the old behavior: everything goes back beside the menu
+        for _, p in pairs(self.Panels) do
+            if p.Dock then pcall(p.Dock, p, true) end
+        end
+    end
+end
+
+-- ---------- 1) docked panels stop following the menu ----------
+-- After a panel has been opened once and the user has not dragged it, a "place" request that did not come
+-- from Dock() only fixes its size and keeps it on screen. Its position is left alone.
+P.Place = Lib._Place
+function Lib:_Place(panel, animate)
+    if panel and panel.Side and not panel.Moved and not panel._forcePlace and panel._opened75 and not self:LoadPanelFollow() then
+        local vp, s = GetViewport(), self.Scale
+        local w = math.min(panel.W, (vp.X - 8) / s)
+        local h = math.min(panel.H, (vp.Y - 8) / s)
+        panel.CW, panel.CH = w, h
+        panel.Frame.Size = UDim2.fromOffset(w, h)
+        local pos = panel.Frame.Position
+        local x = Clamp(pos.X.Offset, 44 - w * s, vp.X - 44)
+        local y = Clamp(pos.Y.Offset, 14, vp.Y - 24)
+        panel.Frame.Position = UDim2.fromOffset(x, y)
+        return
+    end
+    return P.Place(self, panel, animate)
+end
+
+-- ---------- 2) place beside the menu when opened, then float; floating panels ignore the menu's minimize ----------
+P.NewPanel = Lib._NewPanel
+function Lib:_NewPanel(name, frame, startShown)
+    local p = P.NewPanel(self, name, frame, startShown)
+    if name == "Window" then return p end
+
+    local oset = p.Set
+    function p:Set(state, instant)
+        if state and self.Side and not self.Moved and not self.Enabled then
+            -- opening: put it beside the menu right now (this is the only time it is placed automatically)
+            self._forcePlace = true
+            pcall(function() Lib:_Place(self) end)
+            self._forcePlace = nil
+            self._opened75 = true
+        elseif state then
+            self._opened75 = true
+        end
+        return oset(self, state, instant)
+    end
+
+    local orf = p.Refresh
+    function p:Refresh(instant)
+        if self._opened75 and self.Side and not self.Moved and not Lib:LoadPanelFollow() then
+            -- the original Refresh hides docked panels when the menu is minimized; floating panels stay
+            self.Moved = true
+            local ok, err = pcall(orf, self, instant)
+            self.Moved = false
+            if not ok then error(err, 0) end
+            return
+        end
+        return orf(self, instant)
+    end
+    return p
+end
+
+-- ---------- 3) no snap-back after dragging a panel ----------
+-- The panel header's drag handler calls panel:Dock(true) from OnEnd when you drop it close to the menu.
+-- OnEnd is wrapped to set a flag, and Dock ignores calls made while that flag is set.
+P.MakeDraggable = Lib.MakeDraggable
+function Lib:MakeDraggable(handle, target, opts)
+    local panel = target and Lib.Panels[target.Name]
+    if panel and panel.Side and opts and opts.OnEnd and handle.Name == "Head" then
+        local oe = opts.OnEnd
+        opts = Merge(opts, { OnEnd = function()
+            panel._inEnd75 = true
+            local ok, err = pcall(oe)
+            panel._inEnd75 = nil
+            if not ok then warn("[Aether] panel drag end: " .. tostring(err)) end
+        end })
+    end
+    return P.MakeDraggable(self, handle, target, opts)
+end
+
+P.MakePanel = Lib._MakePanel
+function Lib:_MakePanel(...)
+    local panel, frame = P.MakePanel(self, ...)
+    local od = panel.Dock
+    function panel:Dock(animate)
+        if self._inEnd75 then return end
+        return od(self, animate)
+    end
+    return panel, frame
+end
+
+-- ---------- 4) settings toggle ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    pcall(function()
+        local w = window or self.MainWindow
+        if not w or w._p76 then return end
+        w._p76 = true
+        for _, t in ipairs(w.Tabs) do
+            for _, sub in ipairs(t.Subs) do
+                for _, gb in ipairs(sub.Groupboxes) do
+                    if gb.Name == "Menu" and not gb._p76 then
+                        gb._p76 = true
+                        gb:AddToggle("PanelFollow", { Text = "Panels follow the menu", Default = Lib:LoadPanelFollow(), IgnoreConfig = true,
+                            Tooltip = "Off: chat and ESP preview float on their own after you open them. On: they stay glued beside the menu.",
+                            Callback = function(v) Lib:SetPanelFollow(v) end })
+                    end
+                end
+            end
+        end
+    end)
+    return tab
+end
+
+end
+-- ===================== end patch 7.6 =====================
+
+-- ===================== Aether patch 7.7 (panels open on top, smarter side placement) =====================
+-- Paste right above the final `return Lib` (after patch 7.6).
+do
+local P = {}
+Lib.Version = "7.7.0"
+
+-- ---------- 1) bring a panel in front of everything else (menu included) ----------
+-- Only panel frames are re-numbered (1..n), in their current visual order. The frame to raise ends up on top.
+function Lib:_P77Front(frame)
+    if not (frame and frame.Parent) then return end
+    local isPanel = {}
+    for _, p in pairs(self.Panels) do
+        if p.Frame then isPanel[p.Frame] = true end
+    end
+    local list, idx = {}, 0
+    for _, c in ipairs(frame.Parent:GetChildren()) do
+        idx = idx + 1
+        if c ~= frame and isPanel[c] and c:IsA("GuiObject") then
+            list[#list + 1] = { c, c.ZIndex, idx }
+        end
+    end
+    table.sort(list, function(a, b)
+        if a[2] ~= b[2] then return a[2] < b[2] end
+        return a[3] < b[3] -- same ZIndex: the later sibling was drawn on top, keep that
+    end)
+    local z = 0
+    for _, e in ipairs(list) do
+        z = z + 1
+        e[1].ZIndex = z
+    end
+    frame.ZIndex = z + 1
+end
+
+-- ---------- 2) where a side panel goes ----------
+-- returns width, height (unscaled) and the top-left position in screen pixels
+function Lib:_P77Spot(panel)
+    local win = self.MainWindow
+    local vp, s = GetViewport(), self.Scale
+    local w = math.min(panel.W, (vp.X - 8) / s)
+    local h = math.min(panel.H, (vp.Y - 8) / s)
+    local pw, ph = w * s, h * s
+    local pos = win.Main.Position
+    local ax, ay = pos.X.Offset, pos.Y.Offset
+    local aw = win.W * s
+    local rightX, leftX = ax + aw + 12, ax - 12 - pw
+    local fitsR = rightX + pw <= vp.X - 4
+    local fitsL = leftX >= 4
+    local x
+    if panel.Side == "left" then
+        if fitsL then x = leftX elseif fitsR then x = rightX end
+    else
+        if fitsR then x = rightX elseif fitsL then x = leftX end
+    end
+    if not x then
+        -- no room on either side: take the side with more space, flush with the screen edge
+        local roomR = vp.X - 4 - (ax + aw)
+        local roomL = ax - 4
+        x = (roomR >= roomL) and (vp.X - pw - 4) or 4
+    end
+    x = Clamp(x, 4, math.max(4, vp.X - pw - 4))
+    local y = Clamp(ay, 4, math.max(4, vp.Y - ph - 4))
+    return w, h, Vector2.new(x, y)
+end
+
+-- Only the "real placement" cases are taken over here. The 7.6 floating clamp (panel already opened once,
+-- follow mode off, not forced) still goes down the chain unchanged.
+P.Place = Lib._Place
+function Lib:_Place(panel, animate)
+    local win = self.MainWindow
+    if panel and panel.Side and not panel.Moved and win and win.Main and win.Main.Parent then
+        local follow = self:LoadPanelFollow()
+        local real = panel._forcePlace or (not panel._opened75) or follow
+        local skip = win.Dragged and not panel._forcePlace and not follow -- the 7.4 rule: a dragged menu doesn't pull hidden panels
+        if real and not skip then
+            local w, h, p = self:_P77Spot(panel)
+            panel.CW, panel.CH = w, h
+            panel.Frame.Size = UDim2.fromOffset(w, h)
+            local target = UDim2.fromOffset(p.X, p.Y)
+            if animate then
+                Tween(panel.Frame, { Position = target }, 0.22, Enum.EasingStyle.Quint)
+            else
+                panel.Frame.Position = target
+            end
+            return
+        end
+    end
+    return P.Place(self, panel, animate)
+end
+
+-- ---------- 3) opening a panel puts it on top ----------
+P.NewPanel = Lib._NewPanel
+function Lib:_NewPanel(name, frame, startShown)
+    local p = P.NewPanel(self, name, frame, startShown)
+    if name ~= "Window" then
+        local oset = p.Set
+        function p:Set(state, instant)
+            local r = oset(self, state, instant)
+            if state then
+                Lib:_P77Front(self.Frame)
+                -- the click that opened us (it lands on the menu) may still be raising the menu: once more after it settles
+                task.defer(function()
+                    if self.Enabled and self.Frame.Parent then Lib:_P77Front(self.Frame) end
+                end)
+            end
+            return r
+        end
+    end
+    return p
+end
+
+end
+-- ===================== end patch 7.7 =====================
+
+-- ===================== Aether patch 7.8 (snapped panels ride along with the menu) =====================
+-- Paste right above the final `return Lib` (after patch 7.7).
+do
+local P = {}
+Lib.Version = "7.8.0"
+Lib.PanelRide = true     -- snapped panels move with the menu (false = the 7.6 behavior: panels never follow)
+Lib.PanelSnapDist = 28   -- drop a panel this close (px) to the menu's edge to snap it back on (0 = never snap by dropping)
+
+-- ---------- 1) where a panel goes when it is placed beside the menu ----------
+-- returns width, height (unscaled), top-left position (screen px) and the side it is flush on ("L" / "R", nil = not flush)
+function Lib:_P77Spot(panel)
+    local win = self.MainWindow
+    local vp, s = GetViewport(), self.Scale
+    local w = math.min(panel.W, (vp.X - 8) / s)
+    local h = math.min(panel.H, (vp.Y - 8) / s)
+    local pw, ph = w * s, h * s
+    local pos = win.Main.Position
+    local ax, ay = pos.X.Offset, pos.Y.Offset
+    local aw = win.W * s
+    local rightX, leftX = ax + aw + 12, ax - 12 - pw
+    local fitsR, fitsL = rightX + pw <= vp.X - 4, leftX >= 4
+    local x, side
+    local pref = panel._pref78 -- set when the user dropped the panel next to the menu
+    panel._pref78 = nil
+    if pref == "R" then
+        x, side = rightX, "R"
+    elseif pref == "L" then
+        x, side = leftX, "L"
+    elseif panel.Side == "left" then
+        if fitsL then x, side = leftX, "L" elseif fitsR then x, side = rightX, "R" end
+    else
+        if fitsR then x, side = rightX, "R" elseif fitsL then x, side = leftX, "L" end
+    end
+    if not x then
+        -- no room on either side: roomier side, flush with the screen edge, fully visible, not snapped
+        local roomR, roomL = vp.X - 4 - (ax + aw), ax - 4
+        x = (roomR >= roomL) and (vp.X - pw - 4) or 4
+        x = Clamp(x, 4, math.max(4, vp.X - pw - 4))
+    else
+        x = Clamp(x, 44 - pw, vp.X - 44)
+    end
+    local y = Clamp(ay, 4, math.max(4, vp.Y - ph - 4))
+    return w, h, Vector2.new(x, y), side
+end
+
+-- ---------- 2) a snapped panel follows the menu ----------
+function Lib:_P78Ride(panel, side)
+    local win = self.MainWindow
+    local vp, s = GetViewport(), self.Scale
+    local w = math.min(panel.W, (vp.X - 8) / s)
+    local h = math.min(panel.H, (vp.Y - 8) / s)
+    local pw, ph = w * s, h * s
+    local pos = win.Main.Position
+    local ax, ay = pos.X.Offset, pos.Y.Offset
+    local aw = win.W * s
+    local x = (side == "L") and (ax - 12 - pw) or (ax + aw + 12)
+    if win.Fullscreen then
+        x = Clamp(x, 4, math.max(4, vp.X - pw - 4)) -- fullscreen menu: keep the panel fully on screen
+    else
+        x = Clamp(x, 44 - pw, vp.X - 44)            -- otherwise it may slide partly off, but its header stays reachable
+    end
+    local y = Clamp(ay, 4, math.max(4, vp.Y - ph - 4))
+    panel.CW, panel.CH = w, h
+    local f = panel.Frame
+    if f.Size.X.Offset ~= w or f.Size.Y.Offset ~= h then f.Size = UDim2.fromOffset(w, h) end
+    f.Position = UDim2.fromOffset(x, y)
+end
+
+-- The menu's move / resize handler calls _Place on every side panel. Snapped panels ride; everything else
+-- goes down the chain exactly as before (7.7 / 7.6 / 7.4).
+P.Place = Lib._Place
+function Lib:_Place(panel, animate)
+    local win = self.MainWindow
+    if panel and panel.Side and not panel.Moved and win and win.Main and win.Main.Parent then
+        local follow = self:LoadPanelFollow()
+        if panel._snap78 and not panel._forcePlace and (self.PanelRide ~= false or follow) then
+            self:_P78Ride(panel, panel._snap78)
+            return
+        end
+        local real = panel._forcePlace or (not panel._opened75) or follow
+        local skip = win.Dragged and not panel._forcePlace and not follow
+        if real and not skip then
+            local w, h, p, side = self:_P77Spot(panel)
+            panel._snap78 = side -- nil when it could not sit flush: it floats until you press Dock
+            panel.CW, panel.CH = w, h
+            panel.Frame.Size = UDim2.fromOffset(w, h)
+            local target = UDim2.fromOffset(p.X, p.Y)
+            if animate then
+                Tween(panel.Frame, { Position = target }, 0.22, Enum.EasingStyle.Quint)
+            else
+                panel.Frame.Position = target
+            end
+            return
+        end
+    end
+    return P.Place(self, panel, animate)
+end
+
+-- ---------- 3) drop a panel next to the menu = snap ----------
+function Lib:_P78DropSnap(panel)
+    local dist = tonumber(self.PanelSnapDist) or 0
+    local win = self.MainWindow
+    if dist <= 0 or not panel.Moved then return end
+    if not (win and win.Main and win.Main.Parent) or win.Fullscreen then return end
+    local f = panel.Frame
+    local fx, fy = f.Position.X.Offset, f.Position.Y.Offset
+    local pw = f.AbsoluteSize.X
+    local pos = win.Main.Position
+    local ax, ay = pos.X.Offset, pos.Y.Offset
+    local aw = win.W * self.Scale
+    local dR = Vector2.new(fx - (ax + aw + 12), fy - ay).Magnitude
+    local dL = Vector2.new(fx - (ax - 12 - pw), fy - ay).Magnitude
+    local side, best = nil, dist
+    if dR < best then side, best = "R", dR end
+    if dL < best then side, best = "L", dL end
+    if not side then return end
+    panel._pref78 = side
+    panel._inEnd75 = nil -- 7.6 blocks Dock while a drag is ending; this call is intentional
+    panel:Dock(true)     -- Moved = false, hides the Dock button, places + snaps via _Place above
+end
+
+P.MakeDraggable = Lib.MakeDraggable
+function Lib:MakeDraggable(handle, target, opts)
+    local panel = target and Lib.Panels[target.Name]
+    if panel and panel.Side and opts and opts.OnEnd and handle.Name == "Head" and not opts._p78 then
+        local oe = opts.OnEnd
+        opts = Merge(opts, { _p78 = true, OnEnd = function()
+            pcall(oe)
+            pcall(Lib._P78DropSnap, Lib, panel)
+        end })
+    end
+    return P.MakeDraggable(self, handle, target, opts)
+end
+
+end
+-- ===================== end patch 7.8 =====================
+
+-- ===================== Aether patch 7.9 (fixed snap sides + fit to screen) =====================
+-- Paste right above the final `return Lib` (after patch 7.8).
+do
+local P = {}
+Lib.Version = "7.9.0"
+Lib.PanelFit = true
+Lib.PanelFitMinScale = 0.5
+Lib.PanelMinW = { ESPPreview = 220, Chat = 290 }
+
+local GAP, EDGE = 12, 4
+
+local function Floor(n) return math.floor(n + 0.5) end
+
+-- ---------- 1) the solver ----------
+-- Lays out [ESP panel][gap][menu][gap][chat panel] inside the screen width.
+-- arg = the panel being placed right now (or nil), animate = tween that panel's position.
+function Lib:_P79Run(arg, animate)
+    local win = self.MainWindow
+    if not (win and win.Main and win.Main.Parent) or win.Fullscreen then return false end
+    local vp = GetViewport()
+    if vp.X < 100 or vp.Y < 100 then return false end
+    local ride = self.PanelRide ~= false or self:LoadPanelFollow()
+
+    -- who takes part: one panel per side, opened, snapped, not dragged away
+    local L, R
+    for _, p in pairs(self.Panels) do
+        if p.Side and p.Frame and p.Frame.Parent and not p.Moved then
+            local on
+            if p == arg then on = p.Enabled or p._forcePlace
+            else on = ride and p.Enabled and p._snap79 end
+            if on then
+                if p.Side == "left" then L = L or p else R = R or p end
+            end
+        end
+    end
+    -- a closed panel that is being placed is only parked next to the menu, it takes no space from the others
+    local park = arg ~= nil and arg ~= L and arg ~= R and not (arg.Enabled or arg._forcePlace)
+    if arg and arg ~= L and arg ~= R and not park then return false end
+
+    local base = (self._fit79 and self._fit79.base) or self.Scale
+    local mPref = win.BaseW
+    local ms = win.Cfg and win.Cfg.MinSize
+    local mMin = math.min(mPref, (ms and ms.X) or 400)
+    local items, order = { m = { pref = mPref, min = mMin } }, {}
+    order[1] = items.m
+    local function Add(key, p)
+        items[key] = { pref = p.W, min = math.min(p.W, self.PanelMinW[p.Name] or 240) }
+        order[#order + 1] = items[key]
+    end
+    if L then Add("l", L) end
+    if R then Add("r", R) end
+    local gaps = ((L and 1 or 0) + (R and 1 or 0)) * GAP
+
+    -- widths for a given scale: preferred if it fits, else shrink proportionally to slack, else minimums
+    local function Fit(sc)
+        local avail = (vp.X - 2 * EDGE - gaps) / sc
+        local prefSum, minSum = 0, 0
+        for _, it in ipairs(order) do prefSum = prefSum + it.pref minSum = minSum + it.min end
+        if prefSum <= avail then
+            for _, it in ipairs(order) do it.w = it.pref end
+            return true, minSum
+        end
+        if minSum <= avail then
+            local d, slack = prefSum - avail, prefSum - minSum
+            for _, it in ipairs(order) do it.w = it.pref - d * (it.pref - it.min) / slack end
+            return true, minSum
+        end
+        for _, it in ipairs(order) do it.w = it.min end
+        return false, minSum
+    end
+
+    -- scale: lowered only when even the minimum widths don't fit
+    local sc = base
+    local ok, minSum = Fit(base)
+    if not ok then
+        sc = Clamp((vp.X - 2 * EDGE - gaps) / minSum, self.PanelFitMinScale or 0.5, base)
+    end
+    if sc >= base - 0.001 then
+        self._fit79 = nil
+    elseif not self._fit79 then
+        self._fit79 = { base = base }
+    end
+    if math.abs(sc - self.Scale) > 0.001 then
+        self._busy79 = true
+        pcall(self._ApplyScale, self, sc)
+        self._busy79 = false
+    end
+    sc = self.Scale
+    Fit(sc)
+
+    -- menu width (never wider than the normal fit-to-viewport width)
+    local natural = math.min(mPref, (vp.X - 16) / sc)
+    local mw = Floor(math.min(items.m.w, natural))
+    if math.abs(win.W - mw) >= 1 then
+        win.W = mw
+        self._busy79 = true
+        win.Main.Size = UDim2.fromOffset(mw, win.Minimized and 46 or win.H)
+        self._busy79 = false
+    end
+
+    local pos = win.Main.Position
+    local ax, ay = pos.X.Offset, pos.Y.Offset
+    local mPx = mw * sc
+    local lw = L and Floor(items.l.w) or 0
+    local rw = R and Floor(items.r.w) or 0
+
+    -- the menu slides sideways only as far as needed to keep both panels on screen
+    if L or R then
+        local lo = EDGE + (L and (lw * sc + GAP) or 0)
+        local hi = vp.X - EDGE - (R and (rw * sc + GAP) or 0) - mPx
+        local nx = Clamp(ax, lo, math.max(lo, hi))
+        if math.abs(nx - ax) >= 1 then
+            ax = nx
+            self._busy79 = true
+            win.Main.Position = UDim2.fromOffset(Floor(nx), ay)
+            self._busy79 = false
+        end
+    end
+
+    local function Put(p, w, x)
+        local h = Floor(math.min(p.H, (vp.Y - 2 * EDGE) / sc))
+        local y = Clamp(ay, EDGE, math.max(EDGE, vp.Y - h * sc - EDGE))
+        x = Clamp(x, EDGE, math.max(EDGE, vp.X - w * sc - EDGE))
+        p.CW, p.CH = w, h
+        local f = p.Frame
+        local sz = f.Size
+        if sz.X.Offset ~= w or sz.Y.Offset ~= h then f.Size = UDim2.fromOffset(w, h) end
+        local tgt = UDim2.fromOffset(Floor(x), Floor(y))
+        if animate and p == arg and f.Visible then
+            Tween(f, { Position = tgt }, 0.22, Enum.EasingStyle.Quint)
+        else
+            f.Position = tgt
+        end
+    end
+    if L then Put(L, lw, ax - GAP - lw * sc) end
+    if R then Put(R, rw, ax + mPx + GAP) end
+    if park then
+        local w = Floor(math.min(arg.W, (vp.X - 2 * EDGE) / sc))
+        Put(arg, w, arg.Side == "left" and (ax - GAP - w * sc) or (ax + mPx + GAP))
+    end
+    return true
+end
+
+function Lib:_P79Apply(arg, animate)
+    if self._busy79 or self.PanelFit == false then return false end
+    local ok, res = pcall(self._P79Run, self, arg, animate)
+    self._busy79 = false
+    if not ok then
+        warn("[Aether] panel fit: " .. tostring(res))
+        return false
+    end
+    return res
+end
+
+function Lib:_P79Schedule()
+    if self._q79 then return end
+    self._q79 = true
+    task.defer(function()
+        self._q79 = false
+        if not self.Unloaded then self:_P79Apply(nil) end
+    end)
+end
+
+-- puts the scale and the menu width back to what you chose (used when the fit is switched off)
+function Lib:_P79Restore()
+    local base = self._fit79 and self._fit79.base
+    self._fit79 = nil
+    if base then
+        self._busy79 = true
+        pcall(self._ApplyScale, self, base)
+        self._busy79 = false
+    end
+    local w = self.MainWindow
+    if w then pcall(w._Fit, w) end
+    for _, p in pairs(self.Panels) do
+        if p.Side and not p.Moved then pcall(self._Place, self, p) end
+    end
+end
+
+-- ---------- 2) placement: fixed side per panel ----------
+P.Place = Lib._Place
+function Lib:_Place(panel, animate)
+    if self._busy79 then return end -- called by the solver's own resize, the solver places everything itself
+    local win = self.MainWindow
+    if self.PanelFit ~= false and panel and panel.Side and not panel.Moved and win and win.Main and win.Main.Parent and not win.Fullscreen then
+        local follow = self:LoadPanelFollow()
+        local ride = self.PanelRide ~= false or follow
+        local real = panel._forcePlace or not panel._opened75 or follow
+        if real or (ride and panel._snap79) then
+            if real then panel._snap79 = true end
+            if self:_P79Apply(panel, animate) then return end
+        end
+    end
+    return P.Place(self, panel, animate)
+end
+
+-- ---------- 3) dropping a panel: it only snaps to ITS OWN side ----------
+function Lib:_P78DropSnap(panel)
+    local dist = tonumber(self.PanelSnapDist) or 0
+    local win = self.MainWindow
+    if dist <= 0 or not (panel and panel.Moved and panel.Side) then return end
+    if not (win and win.Main and win.Main.Parent) or win.Fullscreen then return end
+    local f = panel.Frame
+    local pos = win.Main.Position
+    local aw = win.W * self.Scale
+    local pw = f.AbsoluteSize.X
+    local wantX = (panel.Side == "left") and (pos.X.Offset - GAP - pw) or (pos.X.Offset + aw + GAP)
+    local d = Vector2.new(f.Position.X.Offset - wantX, f.Position.Y.Offset - pos.Y.Offset).Magnitude
+    if d <= dist then
+        panel._inEnd75 = nil -- 7.6 blocks Dock while a drag is ending; this call is intentional
+        panel:Dock(true)
+    end
+end
+
+-- ---------- 4) re-fit when a panel opens / closes, the screen changes or the scale is changed by hand ----------
+P.NewPanel = Lib._NewPanel
+function Lib:_NewPanel(name, frame, startShown)
+    local p = P.NewPanel(self, name, frame, startShown)
+    if name ~= "Window" then
+        local oset = p.Set
+        function p:Set(state, instant)
+            local was = self.Enabled and true or false
+            local r = oset(self, state, instant)
+            if was ~= (self.Enabled and true or false) then Lib:_P79Schedule() end
+            return r
+        end
+    end
+    return p
+end
+
+P.SetScale = Lib.SetScale
+function Lib:SetScale(s)
+    self._fit79 = nil -- the value you pick becomes the new base
+    P.SetScale(self, s)
+    self:_P79Schedule()
+end
+
+P.AutoFit = Window.AutoFit
+function Window:AutoFit(resetPosition)
+    Lib._fit79 = nil
+    local r = P.AutoFit(self, resetPosition)
+    Lib:_P79Schedule()
+    return r
+end
+
+Lib:Connect(Lib.Gui:GetPropertyChangedSignal("AbsoluteSize"), function() Lib:_P79Schedule() end)
+
+-- ---------- 5) settings toggle ----------
+P.BuildSettingsTab = Lib.BuildSettingsTab
+function Lib:BuildSettingsTab(window)
+    local tab = P.BuildSettingsTab(self, window)
+    pcall(function()
+        local w = window or self.MainWindow
+        if not w or w._p79 then return end
+        w._p79 = true
+        for _, t in ipairs(w.Tabs) do
+            for _, sub in ipairs(t.Subs) do
+                for _, gb in ipairs(sub.Groupboxes) do
+                    if gb.Name == "Menu" and not gb._p79 then
+                        gb._p79 = true
+                        gb:AddToggle("PanelFit", { Text = "Fit chat & ESP on screen", Default = Lib.PanelFit ~= false, IgnoreConfig = true,
+                            Tooltip = "Chat snaps right of the menu, ESP preview left. Everything shrinks (and the UI scale drops on small screens) so it all fits.",
+                            Callback = function(v)
+                                Lib.PanelFit = v and true or false
+                                if Lib.PanelFit then Lib:_P79Schedule() else Lib:_P79Restore() end
+                            end })
+                    end
+                end
+            end
+        end
+    end)
+    return tab
+end
+
+end
+-- ===================== end patch 7.9 =====================
+
 return Lib
